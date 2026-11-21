@@ -1,0 +1,454 @@
+import {
+  AstSymbolNode,
+  ComputedNodePlan,
+  ContextAssemblyResult,
+  McpToolInvocationRecord,
+  NodeTier,
+  OverrideMode,
+  ParsedWorkspace,
+  ProtocolComparisonMetrics,
+} from '../types/context';
+import { estimateTokens } from './astParser';
+import {
+  detectHighComplexityClusters,
+  invokeSkeletonExpansionMcpTool,
+} from './skeletonExpansion';
+
+const BILINGUAL_KEYWORDS: Array<[RegExp, string[]]> = [
+  [/折扣|優惠|折價|coupon|discount/i, ['discount', 'coupon', 'promo', 'applydiscount', 'validatecoupon']],
+  [/庫存|存貨|鎖定|競態|inventory|stock|lock/i, ['inventory', 'stock', 'lock', 'acquire', 'release', 'reserve']],
+  [/結帳|訂單|購物車|checkout|order/i, ['checkout', 'order', 'cart', 'processorder', 'submitorder']],
+  [/付款|金流|刷卡|payment|charge/i, ['payment', 'charge', 'refund', 'gateway', 'stripe']],
+  [/稅|金額|價格|定價|tax|price|pricing/i, ['tax', 'price', 'pricing', 'subtotal', 'total', 'calculate']],
+  [/認證|登入|權限|token|auth/i, ['auth', 'token', 'session', 'jwt', 'interceptor', 'refresh']],
+  [/快取|同步|cache|sync/i, ['cache', 'sync', 'invalidate', 'revalidate', 'workspace']],
+  [/驗證|檢查|校驗|valid/i, ['validate', 'verify', 'schema', 'check', 'guard']],
+  [/重試|佇列|失敗|retry|queue/i, ['retry', 'queue', 'backoff', 'deadletter', 'recover']],
+  [/通知|推播|webhook|audit|log/i, ['webhook', 'notify', 'audit', 'log', 'dispatch']],
+  [/匯出|下載|報表|export|csv/i, ['export', 'download', 'serialize', 'report']],
+];
+
+function expandQueryTerms(query: string): string[] {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+
+  const tokens = new Set<string>();
+  const asciiParts = trimmed.toLowerCase().match(/[a-z0-9_]+/g) ?? [];
+  for (const p of asciiParts) {
+    if (p.length >= 2) tokens.add(p);
+  }
+
+  for (const [pattern, synonyms] of BILINGUAL_KEYWORDS) {
+    if (pattern.test(trimmed)) {
+      for (const s of synonyms) tokens.add(s);
+    }
+  }
+
+  return Array.from(tokens);
+}
+
+export function scoreNodeRelevance(node: AstSymbolNode, queryTerms: string[]): number {
+  if (queryTerms.length === 0) return 0;
+
+  const haystackName = node.name.toLowerCase();
+  const haystackPath = node.filePath.toLowerCase();
+  const haystackDoc = node.docComment.toLowerCase();
+  const haystackBody = node.fullCode.toLowerCase();
+
+  let score = 0;
+  for (const term of queryTerms) {
+    if (haystackName === term) score += 28;
+    else if (haystackName.includes(term)) score += 16;
+
+    if (haystackPath.includes(term)) score += 8;
+    if (haystackDoc.includes(term)) score += 6;
+
+    // Count bounded occurrences in body (BM25-like saturation)
+    const occ = haystackBody.split(term).length - 1;
+    if (occ > 0) {
+      score += Math.min(12, 3 * Math.log1p(occ) * 2.5);
+    }
+  }
+
+  // Slight preference for callable functions/methods over pure passive interfaces when searching tasks
+  if (score > 0 && (node.kind === 'function' || node.kind === 'method')) {
+    score *= 1.15;
+  }
+
+  return Number(score.toFixed(2));
+}
+
+export interface AssembleOptions {
+  workspace: ParsedWorkspace;
+  query: string;
+  pinnedFocalIds: string[];
+  overrides: Record<string, OverrideMode>;
+  budgetTokens: number;
+  maxHops: 1 | 2;
+  autoExpandClusters?: boolean;
+  proactiveExpandedIds?: string[];
+  proactiveToolCall?: McpToolInvocationRecord | null;
+}
+
+export function assembleDynamicContext(options: AssembleOptions): ContextAssemblyResult {
+  const {
+    workspace,
+    query,
+    pinnedFocalIds,
+    overrides,
+    budgetTokens,
+    maxHops,
+    autoExpandClusters = true,
+    proactiveExpandedIds,
+    proactiveToolCall,
+  } = options;
+  const { nodes, edges, totalRawTokens } = workspace;
+
+  const queryTerms = expandQueryTerms(query);
+
+  // 1. Score all nodes
+  const scores = new Map<string, number>();
+  for (const node of nodes) {
+    scores.set(node.id, scoreNodeRelevance(node, queryTerms));
+  }
+
+  // 2. Determine focal nodes (pinned takes precedence, else top BM25 matches, else top exported function)
+  let focalIds: string[] = pinnedFocalIds.filter((id) => nodes.some((n) => n.id === id));
+
+  if (focalIds.length === 0 && queryTerms.length > 0) {
+    const ranked = [...nodes]
+      .map((n) => ({ id: n.id, score: scores.get(n.id) ?? 0 }))
+      .filter((r) => r.score > 0)
+      .sort((a, b) => b.score - a.score);
+
+    if (ranked.length > 0) {
+      const topScore = ranked[0].score;
+      focalIds = ranked
+        .filter((r, idx) => idx < 2 || r.score >= topScore * 0.72)
+        .slice(0, 3)
+        .map((r) => r.id);
+    }
+  }
+
+  if (focalIds.length === 0 && nodes.length > 0) {
+    const firstCallable =
+      nodes.find((n) => n.exported && (n.kind === 'function' || n.kind === 'method')) ?? nodes[0];
+    focalIds = [firstCallable.id];
+  }
+
+  const focalSet = new Set(focalIds);
+
+  // 3. Build undirected adjacency list for BFS (both callers & callees matter for safe code edits)
+  const adj = new Map<string, Set<string>>();
+  for (const n of nodes) adj.set(n.id, new Set());
+  for (const edge of edges) {
+    adj.get(edge.sourceNodeId)?.add(edge.targetNodeId);
+    adj.get(edge.targetNodeId)?.add(edge.sourceNodeId);
+  }
+
+  // BFS from focal nodes
+  const hopMap = new Map<string, number>();
+  const queue: Array<{ id: string; hop: number }> = [];
+  for (const fId of focalIds) {
+    hopMap.set(fId, 0);
+    queue.push({ id: fId, hop: 0 });
+  }
+
+  let head = 0;
+  while (head < queue.length) {
+    const curr = queue[head++];
+    if (curr.hop >= maxHops) continue;
+    const neighbors = adj.get(curr.id);
+    if (!neighbors) continue;
+    for (const nb of neighbors) {
+      if (!hopMap.has(nb)) {
+        hopMap.set(nb, curr.hop + 1);
+        queue.push({ id: nb, hop: curr.hop + 1 });
+      }
+    }
+  }
+
+  // 4. Priority ordering & greedy budget-aware tier assignment
+  const plansMap = new Map<string, ComputedNodePlan>();
+  const packetOverheadTokens = 95; // XML/Markdown section wrappers
+  let remainingBudget = Math.max(0, budgetTokens - packetOverheadTokens);
+
+  // Sort candidates: Manual Full -> Focal -> 1-Hop -> 2-Hop -> Same-File Types -> Rest
+  const prioritySorted = [...nodes].sort((a, b) => {
+    const ovA = overrides[a.id] ?? 'auto';
+    const ovB = overrides[b.id] ?? 'auto';
+    if (ovA === 'full' && ovB !== 'full') return -1;
+    if (ovB === 'full' && ovA !== 'full') return 1;
+
+    const hopA = hopMap.get(a.id) ?? 99;
+    const hopB = hopMap.get(b.id) ?? 99;
+    if (hopA !== hopB) return hopA - hopB;
+
+    const sA = scores.get(a.id) ?? 0;
+    const sB = scores.get(b.id) ?? 0;
+    if (sA !== sB) return sB - sA;
+
+    // Prefer keeping interfaces/types of touched files
+    const typeA = a.kind === 'interface' || a.kind === 'type' ? 1 : 0;
+    const typeB = b.kind === 'interface' || b.kind === 'type' ? 1 : 0;
+    return typeB - typeA;
+  });
+
+  for (const node of prioritySorted) {
+    const override = overrides[node.id] ?? 'auto';
+    const hop = hopMap.has(node.id) ? hopMap.get(node.id)! : null;
+    const isFocal = focalSet.has(node.id);
+    const relevanceScore = scores.get(node.id) ?? 0;
+
+    let tier: NodeTier = 'excluded';
+    let reason = '跟這次要改的重點沒關係，先略過';
+
+    if (override === 'exclude') {
+      tier = 'excluded';
+      reason = '你手動設定略過';
+    } else if (override === 'full') {
+      tier = 'full';
+      remainingBudget = Math.max(0, remainingBudget - node.rawTokens);
+      reason = '你手動設定看完整內容';
+    } else if (override === 'skeleton') {
+      tier = 'skeleton';
+      remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
+      reason = '你手動設定只留外框';
+    } else {
+      // Automatic 3-tier progressive allocation
+      if (isFocal) {
+        if (node.rawTokens <= remainingBudget || remainingBudget === budgetTokens - packetOverheadTokens) {
+          tier = 'full';
+          remainingBudget = Math.max(0, remainingBudget - node.rawTokens);
+          reason = '這是你要改的重點（保留 100% 完整內容）';
+        } else if (node.skeletonTokens <= remainingBudget) {
+          tier = 'skeleton';
+          remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
+          reason = '額度快滿了，重點先縮成外框';
+        } else {
+          tier = 'map';
+          remainingBudget = Math.max(0, remainingBudget - node.mapTokens);
+          reason = '額度不夠了，只留名稱和行號';
+        }
+      } else if (hop !== null && hop <= maxHops) {
+        if (node.skeletonTokens <= remainingBudget) {
+          tier = 'skeleton';
+          remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
+          reason = `跟重點有直接關聯（隔 ${hop} 層，先留外框給 AI 參考）`;
+        } else if (node.mapTokens <= remainingBudget) {
+          tier = 'map';
+          remainingBudget = Math.max(0, remainingBudget - node.mapTokens);
+          reason = `隔 ${hop} 層的相關程式（額度比較緊，先只留位置）`;
+        }
+      } else if (
+        (node.kind === 'interface' || node.kind === 'type') &&
+        focalIds.some((fid) => nodes.find((x) => x.id === fid)?.fileId === node.fileId) &&
+        node.skeletonTokens <= remainingBudget
+      ) {
+        // Same-file types are essential for single-file monolith edits
+        tier = 'skeleton';
+        remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
+        reason = '同一支檔案裡的資料格式定義（自動保留）';
+      } else if (node.exported && node.mapTokens <= remainingBudget * 0.35) {
+        tier = 'map';
+        remainingBudget = Math.max(0, remainingBudget - node.mapTokens);
+        reason = '其他公開函式的位置清單';
+      }
+    }
+
+    const injectedTokens =
+      tier === 'full'
+        ? node.rawTokens
+        : tier === 'skeleton'
+          ? node.skeletonTokens
+          : tier === 'map'
+            ? node.mapTokens
+            : 0;
+
+    plansMap.set(node.id, {
+      node,
+      tier,
+      override,
+      hopDistance: hop,
+      relevanceScore,
+      isFocal,
+      injectedTokens,
+      reason,
+    });
+  }
+
+  // Preserve original file/line order for initial pass
+  const baseNodePlans = nodes.map((n) => plansMap.get(n.id)!);
+
+  // 5. High-Complexity Cluster Detection + Proactive Discovery MCP `expand_skeleton_cluster` Flow
+  const { clusters, complexityByNodeId } = detectHighComplexityClusters(
+    workspace,
+    baseNodePlans,
+    focalIds,
+  );
+  const remainingBudgetForExpansion = remainingBudget;
+
+  let expandedIds: string[] = [];
+  let updatedClusters = clusters;
+  let toolCallRecord: McpToolInvocationRecord | null = null;
+
+  if (proactiveExpandedIds !== undefined) {
+    const validSet = new Set(proactiveExpandedIds);
+    expandedIds = clusters.filter((c) => validSet.has(c.hubNodeId)).map((c) => c.hubNodeId);
+    const expandedSet = new Set(expandedIds);
+    updatedClusters = clusters.map((c) => ({
+      ...c,
+      resolvedByMcp: expandedSet.has(c.hubNodeId),
+      currentTier: expandedSet.has(c.hubNodeId) ? ('full' as const) : c.currentTier,
+    }));
+    toolCallRecord =
+      proactiveToolCall ??
+      (clusters.length > 0 && !autoExpandClusters
+        ? invokeSkeletonExpansionMcpTool({
+            clusters,
+            remainingBudget,
+            autoExpandEnabled: false,
+            triggerMode: 'proactive-discovery',
+          }).toolCallRecord
+        : null);
+  } else {
+    const expansionResult = invokeSkeletonExpansionMcpTool({
+      clusters,
+      remainingBudget,
+      autoExpandEnabled: autoExpandClusters,
+      triggerMode: 'proactive-discovery',
+    });
+    expandedIds = expansionResult.expandedNodeIds;
+    updatedClusters = expansionResult.updatedClusters;
+    toolCallRecord = expansionResult.toolCallRecord;
+  }
+
+  const autoExpandedSet = new Set(expandedIds);
+
+  for (const id of autoExpandedSet) {
+    const plan = plansMap.get(id);
+    if (!plan) continue;
+    plan.tier = 'full';
+    plan.injectedTokens = plan.node.rawTokens;
+    plan.autoExpanded = true;
+    plan.reason = '系統判斷這段很重要且較複雜，已自動補齊完整內容';
+  }
+
+  const nodePlans = nodes.map((n) => {
+    const plan = plansMap.get(n.id)!;
+    return {
+      ...plan,
+      complexityScore: complexityByNodeId.get(n.id) ?? 0,
+    };
+  });
+
+  const countsByTier: Record<NodeTier, number> = {
+    full: 0,
+    skeleton: 0,
+    map: 0,
+    excluded: 0,
+  };
+  for (const p of nodePlans) {
+    countsByTier[p.tier]++;
+  }
+
+  // Assemble final prompt-ready context packet
+  const fullBlocks = nodePlans.filter((p) => p.tier === 'full');
+  const skeletonBlocks = nodePlans.filter((p) => p.tier === 'skeleton');
+  const mapBlocks = nodePlans.filter((p) => p.tier === 'map');
+
+  const packetSections: string[] = [];
+  packetSections.push('<context_slice mode="progressive-ast-skeleton">');
+
+  if (mapBlocks.length > 0) {
+    packetSections.push('  <repo_symbol_map>');
+    for (const p of mapBlocks) {
+      packetSections.push(
+        `    - ${p.node.filePath}:${p.node.startLine}-${p.node.endLine} | ${p.node.kind} ${p.node.name}`,
+      );
+    }
+    packetSections.push('  </repo_symbol_map>');
+  }
+
+  if (skeletonBlocks.length > 0) {
+    packetSections.push('  <dependency_skeletons note="Signatures and types only; implementations folded">');
+    for (const p of skeletonBlocks) {
+      packetSections.push(`    // [${p.node.filePath}:${p.node.startLine}-${p.node.endLine}] (${p.reason})`);
+      packetSections.push(p.node.skeletonCode);
+      packetSections.push('');
+    }
+    packetSections.push('  </dependency_skeletons>');
+  }
+
+  if (fullBlocks.length > 0) {
+    packetSections.push('  <focal_implementations note="Full source code for active edit targets & auto-expanded complex clusters">');
+    for (const p of fullBlocks) {
+      const tag = p.autoExpanded ? ' [MCP: expand_skeleton_cluster]' : '';
+      packetSections.push(`    // [${p.node.filePath}:${p.node.startLine}-${p.node.endLine}]${tag}`);
+      packetSections.push(p.node.fullCode);
+      packetSections.push('');
+    }
+    packetSections.push('  </focal_implementations>');
+  }
+
+  packetSections.push('</context_slice>');
+  const assembledPacket = packetSections.join('\n');
+  const totalInjectedTokens = estimateTokens(assembledPacket);
+
+  const codeReductionPercent =
+    totalRawTokens > 0
+      ? Math.max(0, Number((((totalRawTokens - totalInjectedTokens) / totalRawTokens) * 100).toFixed(1)))
+      : 0;
+
+  // Protocol & Skill Context Tax Benchmark (per-turn overhead + raw read bloat)
+  const traditionalSkillAndMcpTax = 4850; // ~2,000 tokens Skill prompt + ~2,850 tokens (18-22 MCP tool JSON schemas)
+  const traditionalMultiTurnReadBloat = Math.round(totalRawTokens * 1.15);
+  const traditionalTotalTokens = traditionalSkillAndMcpTax + traditionalMultiTurnReadBloat;
+
+  const thinMcpSchemaTax = 185; // 1 consolidated tool: get_context_slice(query, budget)
+  const thinMcpTotalTokens = thinMcpSchemaTax + totalInjectedTokens;
+
+  const zeroTaxSchemaOverhead = 0;
+  const zeroMcpRuleTax = 42; // Ultra-short 42-token instruction pointing to .context/active-slice.md
+  const zeroTaxTotalTokens = totalInjectedTokens;
+
+  const netSavingsVsTraditionalPercent =
+    traditionalTotalTokens > 0
+      ? Math.max(
+          0,
+          Number((((traditionalTotalTokens - zeroTaxTotalTokens) / traditionalTotalTokens) * 100).toFixed(1)),
+        )
+      : 0;
+
+  const metrics: ProtocolComparisonMetrics = {
+    rawRepoTokens: totalRawTokens,
+    slicedCodeTokens: totalInjectedTokens,
+    codeReductionPercent,
+    traditionalSkillAndMcpTax,
+    traditionalMultiTurnReadBloat,
+    traditionalTotalTokens,
+    thinMcpSchemaTax,
+    thinMcpTotalTokens,
+    zeroTaxSchemaOverhead,
+    zeroMcpRuleTax,
+    zeroTaxTotalTokens,
+    netSavingsVsTraditionalPercent,
+  };
+
+  return {
+    nodePlans,
+    focalNodeIds: focalIds,
+    totalInjectedTokens,
+    budgetTokens,
+    budgetUtilizationPercent:
+      budgetTokens > 0 ? Math.min(999, Number(((totalInjectedTokens / budgetTokens) * 100).toFixed(1))) : 0,
+    overBudget: totalInjectedTokens > budgetTokens,
+    countsByTier,
+    metrics,
+    assembledPacket,
+    detectedClusters: updatedClusters,
+    autoExpandedNodeIds: expandedIds,
+    autoExpansionToolCall: toolCallRecord,
+    remainingBudgetForExpansion,
+  };
+}

@@ -1,0 +1,8 @@
+{
+  "name": "ContextSlice Studio",
+  "description": "零配置 AST 符號索引與動態上下文注入工作台，支援 CLI、瀏覽器與 Desktop Agent 的漸進式骨架展開與去協議稅解決方案。",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
