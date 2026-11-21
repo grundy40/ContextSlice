@@ -5,7 +5,7 @@
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-ContextSlice-blue?style=flat)](https://github.com/grundy40/ContextSlice)
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
-[![Agensi Free Skill](https://img.shields.io/badge/Agensi-Free%20Skill-success)](https://www.agensi.io/skill/context-slice)
+[![Agensi Free Skill](https://img.shields.io/badge/Agensi-Free%20Skill-success)](https://www.agensi.io/skills/context-slice)
 
 ---
 
@@ -221,4 +221,4 @@ claude mcp add --scope user context-slice -- node /path/to/tools/ctxslice-mcp.mj
 ### 📎 相關連結
 
 - **GitHub 原始碼**：[https://github.com/grundy40/ContextSlice](https://github.com/grundy40/ContextSlice)
-- **Agensi 免費技能**：[https://www.agensi.io/skill/context-slice](https://www.agensi.io/skill/context-slice)
+- **Agensi 免費技能**：[https://www.agensi.io/skills/context-slice](https://www.agensi.io/skills/context-slice)
