@@ -221,4 +221,4 @@ claude mcp add --scope user context-slice -- node /path/to/tools/ctxslice-mcp.mj
 ### 📎 相關連結
 
 - **GitHub 原始碼**：[https://github.com/grundy40/ContextSlice](https://github.com/grundy40/ContextSlice)
-- **Agensi 免費技能**：[https://www.agensi.io/skills/context-slice](https://www.agensi.io/skills/context-slice)
+- **Agensi 免費技能（透過推廣連結下載）**：[https://www.agensi.io/r/GRUNDY40?to=/skills/context-slice](https://www.agensi.io/r/GRUNDY40?to=/skills/context-slice)
