@@ -3,6 +3,10 @@
 > **幫 AI 挑重點、省 Token 的程式結構分析與精簡工作台**  
 > 在把程式碼交給 AI 之前，先自動找出要修改的函式與上下游關聯，將其他無關細節摺疊成「只留名稱與參數的外框」，大幅縮小體積並避免上下文溢位。
 
+[![GitHub Repo](https://img.shields.io/badge/GitHub-ContextSlice-blue?style=flat)](https://github.com/grundy40/ContextSlice)
+[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+[![Agensi Free Skill](https://img.shields.io/badge/Agensi-Free%20Skill-success)](https://www.agensi.io/skill/context-slice)
+
 ---
 
 ## 目錄
@@ -211,3 +215,10 @@ claude mcp add --scope user context-slice -- node /path/to/tools/ctxslice-mcp.mj
 ## 7. 授權條款
 
 本專案採用 [MIT License](./LICENSE) 開源授權。
+
+---
+
+### 📎 相關連結
+
+- **GitHub 原始碼**：[https://github.com/grundy40/ContextSlice](https://github.com/grundy40/ContextSlice)
+- **Agensi 免費技能**：[https://www.agensi.io/skill/context-slice](https://www.agensi.io/skill/context-slice)
