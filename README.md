@@ -19,7 +19,10 @@
    - [OpenCode / Pi Agent / Claude Code 通用 1-Tool MCP](#51-opencode--pi-agent--claude-code-通用-1-tool-mcp)
    - [網頁版 AI 直接複製貼上（附提問模板）](#52-網頁版-ai-直接複製貼上附提問模板)
 6. [專案結構與隱私安全](#6-專案結構與隱私安全)
-7. [授權條款](#7-授權條款)
+7. [Agensi 免費技能上架](#7-agensi-免費技能上架)
+8. [在 AI 對話中如何提問?](#8-在-ai-對話中如何提問)
+9. [版本更新紀錄](#9-版本更新紀錄)
+10. [授權條款](#10-授權條款)
 
 ---
 
@@ -212,7 +215,21 @@ claude mcp add --scope user context-slice -- node /path/to/tools/ctxslice-mcp.mj
 
 ---
 
-## 7. 授權條款
+## 9. 版本更新紀錄
+
+### v0.1.2（2026-11-22）
+
+- **支援所有程式碼檔案**：匯入層改為接受所有文字型程式碼檔（含無副檔名的 Makefile、Dockerfile、shell 腳本與各種設定檔），自動略過圖片、壓縮檔、執行檔等二進位檔與 lock / minified 雜訊檔。
+- **新增通用解析器**：未列名語言（Lua、Scala、Dart、Zig、Elixir 等）自動切分函式與類別區塊，大型容器會提取內部方法；無結構可切分時以整檔模組呈現。
+- **匯出工具同步**：`ctxslice.mjs` 與 `ctxslice-mcp.mjs` 採用相同檔案篩選邏輯，並為 end 結尾語言加入 skeleton 折疊退化保護。
+
+### v0.1.1（2026-11-21）
+
+- 首次公開發布：多語言 AST 解析、互動式程式關聯圖、四種串接方式（網頁版複製貼上 / CLI / 免裝工具 / 1-Tool MCP）、省量分析與實戰基準測試、離線 PDF 匯出。
+
+---
+
+## 10. 授權條款
 
 本專案採用 [MIT License](./LICENSE) 開源授權。
 
