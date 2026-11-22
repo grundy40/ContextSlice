@@ -40,7 +40,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
       const { files, report } = await readFilesFromFileList(list, sourceLabel);
       if (files.length === 0) {
         setErrorMsg(
-          '沒有找到支援的程式碼檔案（支援 TS/JS、Python、Go、C/C++、Swift、PHP、HTML/CSS、Rust、Java、C#、Ruby、SQL 等）',
+          '沒有找到可分析的程式碼檔案（任何文字型程式碼檔皆可匯入；圖片、壓縮檔、執行檔等二進位檔會自動略過）',
         );
         return;
       }
@@ -183,7 +183,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                   支援 TS/JS、Python、Go、C/C++、Swift、PHP、HTML/CSS、Rust、Java、C#、Ruby 等語言；所有分析都在瀏覽器本機完成，不會上傳到外部伺服器。
                 </p>
                 <p className="mt-1 text-[11px] text-slate-500">
-                  瀏覽器單次最多載入 80 個檔案（自動略過 node_modules、.git、dist 等編譯目錄與超過 1.5MB 檔案）
+                  瀏覽器單次最多載入 80 個檔案（自動略過 node_modules、.git、dist 等編譯目錄、二進位檔與超過 1.5MB 檔案）
                 </p>
 
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-3">

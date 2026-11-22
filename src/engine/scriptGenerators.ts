@@ -16,7 +16,7 @@ export function generateCliScript(config: GeneratorConfig): string {
   return `#!/usr/bin/env node
 /**
  * ctxslice.mjs — Zero-Config Multi-Language Local AST Context Pre-Compiler
- * Supports: TS/JS, Python, Go, C/C++, Swift, PHP, HTML/Vue/Svelte, CSS, Rust, Java/Kotlin, C#, Ruby, SQL
+ * Supports any text-based code file; deep skeletonizing for TS/JS, Python, Go, C/C++, Swift, PHP, HTML/Vue/Svelte, CSS, Rust, Java/Kotlin, C#, Ruby, SQL
  * Usage:
  *   node ${toolDir}/ctxslice.mjs "${safeQuery}" --budget ${config.budgetTokens} --hops ${config.maxHops}
  *   node ${toolDir}/ctxslice.mjs "${safeQuery}" --root /path/to/your-project --budget ${config.budgetTokens}
@@ -35,19 +35,40 @@ const IGNORE = new Set([
   'node_modules', '.git', 'dist', 'build', '.next', 'coverage',
   'venv', '.venv', '__pycache__', 'vendor', 'target', '.build', '.swiftpm', 'DerivedData', 'Pods', 'bin', 'obj'
 ]);
-const EXTS = new Set([
-  '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs',
-  '.py', '.pyw', '.go', '.c', '.h', '.cpp', '.cc', '.cxx', '.hpp', '.hh',
-  '.swift', '.php', '.phtml', '.html', '.htm', '.vue', '.svelte',
-  '.css', '.scss', '.rs', '.java', '.kt', '.kts', '.cs', '.rb', '.sql'
+const BINARY_EXT = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.icns', '.tif', '.tiff', '.svg',
+  '.mp4', '.mov', '.avi', '.mkv', '.webm', '.wmv', '.flv', '.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.wma',
+  '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.tgz', '.iso', '.dmg',
+  '.exe', '.dll', '.so', '.dylib', '.bin', '.o', '.a', '.obj', '.lib', '.wasm', '.class', '.jar', '.war', '.pyc', '.pyo',
+  '.ttf', '.otf', '.woff', '.woff2', '.eot',
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp', '.rtf',
+  '.db', '.sqlite', '.sqlite3', '.mdb', '.psd', '.ai', '.sketch', '.fig', '.xd', '.blend'
 ]);
+const NOISE_FILE = /(^|\\/)(package-lock\\.json|npm-shrinkwrap\\.json|yarn\\.lock|pnpm-lock\\.yaml|Cargo\\.lock|poetry\\.lock|Gemfile\\.lock|composer\\.lock|go\\.sum|Podfile\\.lock|packages\\.lock\\.json)$|\\.min\\.(js|mjs|cjs|css)$|\\.map$/i;
+
+function isTextCandidate(full) {
+  if (BINARY_EXT.has(path.extname(full).toLowerCase())) return false;
+  if (NOISE_FILE.test(full.replace(/\\\\/g, '/'))) return false;
+  return true;
+}
+
+function isBinaryBuffer(buf) {
+  const len = Math.min(buf.length, 8192);
+  if (len === 0) return false;
+  let suspicious = 0;
+  for (let i = 0; i < len; i++) {
+    const b = buf[i];
+    if (b === 0 || b < 9 || b === 11 || b === 12 || (b > 13 && b < 32) || b === 127) suspicious++;
+  }
+  return suspicious / len > 0.08;
+}
 
 function walk(dir, acc = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (IGNORE.has(entry.name)) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) walk(full, acc);
-    else if (EXTS.has(path.extname(entry.name).toLowerCase())) acc.push(full);
+    else if (isTextCandidate(full)) acc.push(full);
   }
   return acc;
 }
@@ -79,20 +100,34 @@ function skeletonizeCode(code, ext) {
       }
     );
   }
-  return code.replace(
+  const folded = code.replace(
     /^((?:export\\s+|public\\s+|private\\s+|protected\\s+|internal\\s+|static\\s+|async\\s+|pub\\s+)*(?:function|func|fn|def)\\s+[A-Za-z0-9_$:]+\\s*\\([^)]*\\)[^{\\n]*)\\{[\\s\\S]*?^\\}/gm,
     (_, sig) => \`\${sig.trim()} { /* ... body folded ... */ }\`
   );
+  // Fallback for languages the regexes cannot fold (end-based like Lua/Ruby, etc.):
+  // if folding did not shrink the code, truncate long files to their head lines.
+  if (estimateTokens(folded) >= estimateTokens(code) * 0.9) {
+    const lines = code.split('\\n');
+    if (lines.length > 24) {
+      const cmt = (e === '.lua') ? '--' : (e === '.py' || e === '.pyw' || e === '.rb' || e === '.sh') ? '#' : '*';
+      const openC = cmt === '*' ? '/*' : cmt;
+      const closeC = cmt === '*' ? '*/' : '';
+      return lines.slice(0, 20).join('\\n') + \`\\n\${openC} ... \${lines.length - 20} lines folded ... \${closeC}\`;
+    }
+  }
+  return folded;
 }
 
 const files = walk(targetRoot);
 const terms = query.toLowerCase().split(/\\s+/).filter(Boolean);
 const scored = files.map((filePath) => {
-  const content = fs.readFileSync(filePath, 'utf8');
+  const buf = fs.readFileSync(filePath);
+  if (isBinaryBuffer(buf)) return null;
+  const content = buf.toString('utf8');
   const lower = content.toLowerCase();
   const score = terms.reduce((s, t) => s + (lower.split(t).length - 1) * 4 + (filePath.toLowerCase().includes(t) ? 12 : 0), 0);
   return { filePath: path.relative(targetRoot, filePath), ext: path.extname(filePath), content, score, tokens: estimateTokens(content) };
-}).sort((a, b) => b.score - a.score);
+}).filter(Boolean).sort((a, b) => b.score - a.score);
 
 let remaining = budget;
 const out = ['<context_slice root="' + path.basename(targetRoot) + '" budget="' + budget + '">'];
@@ -162,7 +197,7 @@ export function generateThinMcpServer(config: GeneratorConfig): {
   const serverCode = `#!/usr/bin/env node
 /**
  * ctxslice-mcp.mjs — Global Multi-Language, Multi-Project 1-Tool MCP Server (~195 Tokens Schema Tax)
- * Supports: TS/JS, Python, Go, C/C++, Swift, PHP, HTML/Vue/Svelte, CSS, Rust, Java/Kotlin, C#, Ruby, SQL
+ * Supports any text-based code file; deep skeletonizing for TS/JS, Python, Go, C/C++, Swift, PHP, HTML/Vue/Svelte, CSS, Rust, Java/Kotlin, C#, Ruby, SQL
  * Install ONCE in a shared folder (e.g. ${mcpPath}).
  * Agents call get_context_slice automatically with projectPath + query.
  */
@@ -208,8 +243,26 @@ const IGNORE_DIRS = new Set([
   'venv', '.venv', '__pycache__', 'vendor', 'target', '.build', '.swiftpm', 'DerivedData', 'Pods', 'bin', 'obj'
 ]);
 
-const CODE_EXT_RE = /\\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|pyw|go|c|h|cpp|cc|cxx|hpp|hh|swift|php|phtml|html|htm|vue|svelte|css|scss|rs|java|kt|kts|cs|rb|sql)$/i;
+const BINARY_EXT_RE = /\\.(png|jpe?g|gif|webp|bmp|ico|icns|tiff?|svg|mp4|mov|avi|mkv|webm|wmv|flv|mp3|wav|ogg|flac|aac|m4a|wma|zip|rar|7z|tar|gz|bz2|xz|tgz|iso|dmg|exe|dll|so|dylib|bin|o|a|obj|lib|wasm|class|jar|war|pyc|pyo|ttf|otf|woff2?|eot|pdf|docx?|xlsx?|pptx?|odt|ods|odp|rtf|db|sqlite3?|mdb|psd|ai|sketch|fig|xd|blend|fbx|glb|gltf)$/i;
+const NOISE_FILE_RE = /(^|\\/)(package-lock\\.json|npm-shrinkwrap\\.json|yarn\\.lock|pnpm-lock\\.yaml|Cargo\\.lock|poetry\\.lock|Gemfile\\.lock|composer\\.lock|go\\.sum|Podfile\\.lock|packages\\.lock\\.json)$|\\.min\\.(js|mjs|cjs|css)$|\\.map$/i;
 const CONTROL_WORDS = new Set(['if', 'else', 'for', 'while', 'switch', 'catch', 'return', 'sizeof', 'typeof', 'do', 'try']);
+
+function isAcceptedFile(name) {
+  if (BINARY_EXT_RE.test(name)) return false;
+  if (NOISE_FILE_RE.test(name)) return false;
+  return true;
+}
+
+function isBinaryBuffer(buf) {
+  const len = Math.min(buf.length, 8192);
+  if (len === 0) return false;
+  let suspicious = 0;
+  for (let i = 0; i < len; i++) {
+    const b = buf[i];
+    if (b === 0 || b < 9 || b === 11 || b === 12 || (b > 13 && b < 32) || b === 127) suspicious++;
+  }
+  return suspicious / len > 0.08;
+}
 
 function findBraceEnd(lines, startIdx) {
   let depth = 0, opened = false, end = startIdx;
@@ -380,7 +433,7 @@ function collectProjectBlocks(root) {
       if (IGNORE_DIRS.has(e.name)) continue;
       const full = path.join(d, e.name);
       if (e.isDirectory()) walk(full);
-      else if (CODE_EXT_RE.test(e.name)) files.push(full);
+      else if (isAcceptedFile(e.name)) files.push(full);
     }
   };
   walk(root);
@@ -388,7 +441,9 @@ function collectProjectBlocks(root) {
   const allBlocks = [];
   for (const f of files) {
     const rel = path.relative(root, f);
-    const raw = fs.readFileSync(f, 'utf8');
+    const rawBuf = fs.readFileSync(f);
+    if (isBinaryBuffer(rawBuf)) continue;
+    const raw = rawBuf.toString('utf8');
     const blocks = extractBlocks(raw, path.extname(f));
     const items = blocks.length > 0 ? blocks : [{ name: path.basename(rel), kind: 'module', startLine: 1, endLine: raw.split('\\n').length, full: raw, skeleton: raw.slice(0, 400) }];
     for (const b of items) {

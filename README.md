@@ -1,4 +1,4 @@
-# ContextSlice Studio (`v0.1.1`)
+# ContextSlice Studio (`v0.1.2`)
 
 > **幫 AI 挑重點、省 Token 的程式結構分析與精簡工作台**  
 > 在把程式碼交給 AI 之前，先自動找出要修改的函式與上下游關聯，將其他無關細節摺疊成「只留名稱與參數的外框」，大幅縮小體積並避免上下文溢位。
@@ -38,7 +38,7 @@
 
 ## 2. 支援的程式語言與核心能力
 
-- **支援多語言解析與精簡**：TypeScript / JavaScript、Python、Go、C / C++、Swift、PHP、HTML / Vue / Svelte、CSS / SCSS、Rust、Java / Kotlin、C#、Ruby、SQL。
+- **支援所有程式碼檔案**：任何文字型程式碼檔都能匯入分析，並自動略過圖片、壓縮檔、執行檔等二進位檔與 lock / minified 雜訊檔。其中 TypeScript / JavaScript、Python、Go、C / C++、Swift、PHP、HTML / Vue / Svelte、CSS / SCSS、Rust、Java / Kotlin、C#、Ruby、SQL 提供**深度語言解析**；其餘語言（如 Lua、Scala、Dart、Zig、Elixir、Shell、Makefile、設定檔等）由**通用解析器**自動切分函式與類別區塊，無結構可切分時以整檔模組方式呈現。
 - **長檔案自動分段**：單檔過長時，自動拆解內部函式與類別，只展開你要修改的區塊。
 - **彈性 Token 上限**：支援 `1K`、`4K`、`8K`、`16K`、`32K`、`64K`、`128K`、`256K`、`1M` 快速切換。
 - **互動式程式關聯圖**：支援滑鼠滾輪縮放、拖曳平移、全景小地圖，以及「誰用到它 / 修改重點 / 它用到誰」分層檢視。

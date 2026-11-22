@@ -3,8 +3,41 @@ import { ImportReport } from '../types/context';
 export const MAX_IMPORT_FILES = 80;
 export const MAX_IMPORT_FILE_BYTES = 1_500_000;
 
-export const SUPPORTED_IMPORT_EXT =
-  /\.(ts|tsx|js|jsx|mjs|cjs|py|pyw|go|c|h|cpp|cc|cxx|hpp|hh|hxx|swift|php|phtml|html|htm|vue|svelte|css|scss|less|rs|java|kt|kts|cs|rb|sql|json|yaml|yml|toml|md|sh|ps1)$/i;
+/**
+ * 二進位檔副檔名黑名單（圖片／影音／壓縮／執行檔／字型／Office／資料庫／設計原始檔／資產）。
+ * 只要不在這份名單且通過內容嗅探，任何文字型程式碼檔（含未列名語言、設定檔、無副檔名的
+ * Makefile / Dockerfile 等）都接受匯入。
+ */
+export const BINARY_FILE_EXT =
+  /\.(png|jpe?g|gif|webp|bmp|ico|icns|tiff?|svg|mp4|mov|avi|mkv|webm|wmv|flv|mp3|wav|ogg|flac|aac|m4a|wma|zip|rar|7z|tar|gz|bz2|xz|tgz|iso|dmg|exe|dll|so|dylib|bin|o|a|obj|lib|wasm|class|jar|war|pyc|pyo|ttf|otf|woff2?|eot|pdf|docx?|xlsx?|pptx?|odt|ods|odp|rtf|db|sqlite3?|mdb|psd|ai|sketch|fig|xd|blend|fbx|glb|gltf)$/i;
+
+/** 對結構分析沒有幫助的雜訊檔：各種 lock 檔、minified 產物與 source map */
+export const NOISE_FILE_RE =
+  /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|Gemfile\.lock|composer\.lock|go\.sum|Podfile\.lock|packages\.lock\.json)$|\.min\.(js|mjs|cjs|css)$|\.map$/i;
+
+const SNIFF_SAMPLE_BYTES = 8192;
+
+/** 內容嗅探：含 NUL byte、UTF-8 解碼失敗或控制字元比例過高即視為二進位檔 */
+function isLikelyBinaryText(sample: string): boolean {
+  const len = Math.min(sample.length, SNIFF_SAMPLE_BYTES);
+  if (len === 0) return false;
+  let suspicious = 0;
+  for (let i = 0; i < len; i++) {
+    const code = sample.charCodeAt(i);
+    if (
+      code === 0 ||
+      code === 0xfffd ||
+      code === 127 ||
+      code < 9 ||
+      code === 11 ||
+      code === 12 ||
+      (code > 13 && code < 32)
+    ) {
+      suspicious += 1;
+    }
+  }
+  return suspicious / len > 0.08;
+}
 
 export const IGNORED_IMPORT_DIRS =
   /(^|\/)(node_modules|\.git|dist|build|\.next|coverage|venv|\.venv|__pycache__|site-packages|\.pytest_cache|\.mypy_cache|target|vendor|\.build|\.swiftpm|DerivedData|Pods|bin|obj)(\/|$)/i;
@@ -53,12 +86,18 @@ export async function readFilesFromFileList(
     if (IGNORED_IMPORT_DIRS.test(relPath)) continue;
 
     totalScanned += 1;
-    if (!SUPPORTED_IMPORT_EXT.test(file.name)) {
+    if (BINARY_FILE_EXT.test(file.name) || NOISE_FILE_RE.test(relPath.replace(/\\/g, '/'))) {
       skippedUnsupported += 1;
       continue;
     }
     if (file.size > MAX_IMPORT_FILE_BYTES) {
       skippedOversized += 1;
+      continue;
+    }
+
+    const sample = await file.slice(0, SNIFF_SAMPLE_BYTES).text();
+    if (isLikelyBinaryText(sample)) {
+      skippedUnsupported += 1;
       continue;
     }
     if (files.length >= MAX_IMPORT_FILES) {
@@ -123,7 +162,7 @@ export async function readFilesFromDirectoryHandle(
         if (IGNORED_IMPORT_DIRS.test(relPath)) continue;
 
         totalScanned += 1;
-        if (!SUPPORTED_IMPORT_EXT.test(entry.name)) {
+        if (BINARY_FILE_EXT.test(entry.name) || NOISE_FILE_RE.test(relPath)) {
           skippedUnsupported += 1;
           continue;
         }
@@ -131,6 +170,12 @@ export async function readFilesFromDirectoryHandle(
         const file = await entry.getFile();
         if (file.size > MAX_IMPORT_FILE_BYTES) {
           skippedOversized += 1;
+          continue;
+        }
+
+        const sample = await file.slice(0, SNIFF_SAMPLE_BYTES).text();
+        if (isLikelyBinaryText(sample)) {
+          skippedUnsupported += 1;
           continue;
         }
         if (files.length >= MAX_IMPORT_FILES) {

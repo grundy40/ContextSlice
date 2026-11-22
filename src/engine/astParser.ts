@@ -49,7 +49,10 @@ export function detectLanguage(filePath: string): SupportedLanguage {
     lower.endsWith('.cxx') ||
     lower.endsWith('.hpp') ||
     lower.endsWith('.hh') ||
-    lower.endsWith('.hxx')
+    lower.endsWith('.hxx') ||
+    lower.endsWith('.inl') ||
+    lower.endsWith('.ipp') ||
+    lower.endsWith('.tcc')
   ) {
     return 'cpp';
   }
@@ -1345,6 +1348,228 @@ function parseSqlSymbols(file: CodeFile): AstSymbolNode[] {
   return nodes;
 }
 
+/**
+ * Generic fallback parser for languages without a dedicated parser (Lua, Scala, Dart, Zig,
+ * Elixir, shell scripts, …). Recognizes keyword-based declarations (`fn` / `func` / `def` /
+ * `class` / `struct` / …), shell-style `name() {` blocks, and C-style `type name(args) {`
+ * definitions, then slices them with the shared brace/end matching helpers. Files without
+ * any recognizable structure fall through to the whole-file module fallback in
+ * parseWorkspaceFiles.
+ */
+const GENERIC_DECL_RE =
+  /^[ \t]*(?:(?:pub(?:\([^)]*\))?|public|private|protected|internal|static|final|abstract|override|virtual|async|local|export|global|sealed|open|data|suspend|mutating)[ \t]+)*(fn|func|function|fun|def|sub|proc|procedure|macro|class|struct|interface|trait|impl|enum|object|record|actor|extension|module|namespace)[ \t]+([A-Za-z_][A-Za-z0-9_.:]*)/gm;
+
+const GENERIC_KEYWORD_KIND: Record<string, SymbolKind> = {
+  fn: 'function',
+  func: 'function',
+  function: 'function',
+  fun: 'function',
+  def: 'function',
+  sub: 'function',
+  proc: 'function',
+  procedure: 'function',
+  macro: 'function',
+  class: 'class',
+  struct: 'type',
+  interface: 'interface',
+  trait: 'interface',
+  impl: 'class',
+  enum: 'type',
+  object: 'class',
+  record: 'class',
+  actor: 'class',
+  extension: 'class',
+  module: 'module',
+  namespace: 'module',
+};
+
+const GENERIC_COMMENT_PREFIXES = ['//', '#', '--', '/*', '*', ';', '<!--'];
+
+// Zig-style container: `pub const Config = struct { ... }`
+const GENERIC_ZIG_TYPE_RE =
+  /^[ \t]*(?:pub[ \t]+)?const[ \t]+([A-Za-z_][A-Za-z0-9_.:]*)[ \t]*=[ \t]*(?:packed[ \t]+)?(?:struct|enum|union|error)[ \t]*\{/gm;
+
+// Inner-declaration matchers used for method extraction inside large containers
+const GENERIC_INNER_KEYWORD_RE =
+  /^[ \t]*(?:(?:pub(?:\([^)]*\))?|public|private|protected|internal|static|final|abstract|override|virtual|async|local|export|global|sealed|open|data|suspend|mutating)[ \t]+)*(fn|func|function|fun|def|sub|proc|procedure)[ \t]+([A-Za-z_][A-Za-z0-9_.:]*)/;
+const GENERIC_INNER_CSTYLE_RE =
+  /^[ \t]*[A-Za-z_][A-Za-z0-9_<>:*,[\] &]*?[ \t]+([A-Za-z_~][A-Za-z0-9_]*)[ \t]*\([^;{}]*\)[ \t]*(?:const[ \t]*)?(?:noexcept[ \t]*)?\{/;
+
+function isCommentLine(trimmed: string): boolean {
+  return GENERIC_COMMENT_PREFIXES.some((p) => trimmed.startsWith(p));
+}
+
+/** Finds the absolute index of the opening `{` for a declaration, searching only the decl line and the next two lines. */
+function findNearbyBrace(content: string, startIdx: number): number {
+  let searchEnd = startIdx;
+  for (let k = 0; k < 3 && searchEnd < content.length; k++) {
+    const nl = content.indexOf('\n', searchEnd);
+    searchEnd = nl === -1 ? content.length : nl + 1;
+  }
+  const rel = content.slice(startIdx, searchEnd).indexOf('{');
+  return rel === -1 ? -1 : startIdx + rel;
+}
+
+function parseGenericSymbols(file: CodeFile): AstSymbolNode[] {
+  const { content } = file;
+  const lines = content.split('\n');
+  const nodes: AstSymbolNode[] = [];
+  const covered: Array<[number, number]> = [];
+  const isCovered = (ln: number) => covered.some(([s, e]) => ln >= s && ln <= e);
+  const hasEndTerminators = /^[ \t]*end\b/m.test(content);
+
+  const pushDecl = (name: string, kind: SymbolKind, declLine: number, startIdx: number, braceAbs: number, isBraceMode: boolean) => {
+    const lineText = lines[declLine - 1] ?? '';
+    const indent = lineText.length - lineText.trimStart().length;
+    const indentStr = lineText.slice(0, indent);
+
+    let endLine: number;
+    if (isBraceMode) {
+      const closeAbs = findMatchingBrace(content, braceAbs);
+      endLine = getLineNumberAt(content, closeAbs);
+    } else {
+      endLine = lines.length;
+      for (let j = declLine; j < lines.length; j++) {
+        const endM = lines[j].match(/^[ \t]*end\b/);
+        if (endM && lines[j].length - lines[j].trimStart().length <= indent) {
+          endLine = j + 1;
+          break;
+        }
+      }
+    }
+
+    const { doc, docStartLine } = extractLeadingDoc(lines, declLine);
+    covered.push([docStartLine, endLine]);
+    const fullCode = lines.slice(docStartLine - 1, endLine).join('\n');
+    const lineCount = endLine - docStartLine + 1;
+    const header = isBraceMode ? content.slice(startIdx, braceAbs).trim() : lineText.trim();
+    const folded = Math.max(1, endLine - declLine - 1);
+    const skeletonCode =
+      lineCount <= 4
+        ? fullCode
+        : isBraceMode
+          ? `${doc ? doc + '\n' : ''}${header} { /* ... ${folded} lines folded */ }`
+          : `${lineText}\n${indentStr}  # ... ${folded} lines folded\n${indentStr}end`;
+
+    nodes.push(
+      makeAstNode({
+        file,
+        name,
+        kind,
+        exported: !header.includes('private') && !name.startsWith('_'),
+        startLine: docStartLine,
+        endLine,
+        fullCode,
+        skeletonCode,
+        docComment: doc,
+      }),
+    );
+
+    // Extract methods from containers (class/object/impl/struct bodies) so
+    // inner declarations are still individually addressable, mirroring the
+    // dedicated TS/JS class slicing behavior.
+    if (isBraceMode && lineCount > 4 && (kind === 'class' || kind === 'type' || kind === 'module')) {
+      const bodyStartLine = getLineNumberAt(content, braceAbs) + 1;
+      for (let ln = bodyStartLine; ln < endLine; ln++) {
+        const rawLine = lines[ln - 1] ?? '';
+        const rawTrim = rawLine.trim();
+        if (!rawTrim || isCommentLine(rawTrim)) continue;
+
+        const kwMatch = rawLine.match(GENERIC_INNER_KEYWORD_RE);
+        const cMatch = kwMatch ? null : rawLine.match(GENERIC_INNER_CSTYLE_RE);
+        const innerName = kwMatch ? kwMatch[2] : cMatch ? cMatch[1] : null;
+        if (!innerName || CONTROL_FLOW_WORDS.has(innerName)) continue;
+
+        const lineOffsetAbs = lines.slice(0, ln - 1).join('\n').length + (ln > 1 ? 1 : 0);
+        const innerBraceRel = content.slice(lineOffsetAbs).indexOf('{');
+        if (innerBraceRel === -1) continue;
+        const innerBraceAbs = lineOffsetAbs + innerBraceRel;
+        const innerEndAbs = findMatchingBrace(content, innerBraceAbs);
+        const innerEndLine = getLineNumberAt(content, innerEndAbs);
+        if (innerEndLine >= endLine || innerEndLine - ln < 3) continue;
+
+        covered.push([ln, innerEndLine]);
+        const innerFull = lines.slice(ln - 1, innerEndLine).join('\n');
+        const innerHeader = content.slice(lineOffsetAbs, innerBraceAbs).trim();
+        const innerFolded = Math.max(1, innerEndLine - ln - 1);
+        const innerSkel =
+          innerEndLine - ln + 1 <= 4
+            ? innerFull
+            : `${innerHeader} { /* ... ${innerFolded} lines folded */ }`;
+
+        nodes.push(
+          makeAstNode({
+            file,
+            name: `${name}.${innerName}`,
+            qualifiedName: `${name}.${innerName}`,
+            kind: 'method',
+            exported: !innerHeader.includes('private'),
+            startLine: ln,
+            endLine: innerEndLine,
+            fullCode: innerFull,
+            skeletonCode: innerSkel,
+            docComment: '',
+            shortName: innerName,
+          }),
+        );
+        ln = innerEndLine - 1;
+      }
+    }
+  };
+
+  // 1. Keyword-based declarations (most dynamic & brace-less languages)
+  let m: RegExpExecArray | null;
+  while ((m = GENERIC_DECL_RE.exec(content)) !== null) {
+    const startIdx = m.index;
+    const declLine = getLineNumberAt(content, startIdx);
+    if (isCovered(declLine)) continue;
+    const trimmed = (lines[declLine - 1] ?? '').trim();
+    if (isCommentLine(trimmed)) continue;
+    if (CONTROL_FLOW_WORDS.has(m[2])) continue;
+
+    const braceAbs = findNearbyBrace(content, startIdx);
+    if (braceAbs === -1 && !hasEndTerminators) continue;
+    pushDecl(m[2], GENERIC_KEYWORD_KIND[m[1]] ?? 'function', declLine, startIdx, braceAbs, braceAbs !== -1);
+  }
+
+  // 1b. Zig-style containers: `pub const Config = struct { ... }`
+  while ((m = GENERIC_ZIG_TYPE_RE.exec(content)) !== null) {
+    const startIdx = m.index;
+    const declLine = getLineNumberAt(content, startIdx);
+    if (isCovered(declLine)) continue;
+    const trimmed = (lines[declLine - 1] ?? '').trim();
+    if (isCommentLine(trimmed)) continue;
+    pushDecl(m[1], 'type', declLine, startIdx, startIdx + m[0].lastIndexOf('{'), true);
+  }
+
+  // 2. Fallbacks for files without keyword declarations
+  if (nodes.length === 0) {
+    // Shell-style: name() { ... }
+    const shellRe = /^[ \t]*([A-Za-z_][A-Za-z0-9_-]*)[ \t]*\(\)[ \t]*\{/gm;
+    while ((m = shellRe.exec(content)) !== null) {
+      const declLine = getLineNumberAt(content, m.index);
+      if (isCovered(declLine)) continue;
+      if (CONTROL_FLOW_WORDS.has(m[1])) continue;
+      pushDecl(m[1], 'function', declLine, m.index, m.index + m[0].lastIndexOf('{'), true);
+    }
+  }
+
+  // 3. C-style: return_type name(args) { ... } (Dart, Vala, generic C-like languages).
+  // Runs unconditionally; isCovered() dedupes against keyword / container matches.
+  {
+    const cStyleRe =
+      /^[ \t]*([A-Za-z_][A-Za-z0-9_<>:*,[\] &]*?)[ \t]+([A-Za-z_~][A-Za-z0-9_]*)[ \t]*\([^;{}]*\)[ \t]*(?:const[ \t]*)?(?:noexcept[ \t]*)?\{/gm;
+    while ((m = cStyleRe.exec(content)) !== null) {
+      const declLine = getLineNumberAt(content, m.index);
+      if (isCovered(declLine)) continue;
+      if (CONTROL_FLOW_WORDS.has(m[2])) continue;
+      pushDecl(m[2], 'function', declLine, m.index, m.index + m[0].lastIndexOf('{'), true);
+    }
+  }
+
+  return nodes;
+}
+
 function resolveImportPath(fromPath: string, spec: string, allFiles: CodeFile[]): string | null {
   if (!spec.startsWith('.')) return null;
   const fromParts = fromPath.split('/').slice(0, -1);
@@ -1436,7 +1661,10 @@ export function parseWorkspaceFiles(
       fileImports[file.id] = [];
       extracted = parseSqlSymbols(file);
     } else {
+      // Unknown language: try the generic declaration slicer, then fall back to a
+      // whole-file module node below if nothing recognizable is found.
       fileImports[file.id] = [];
+      extracted = parseGenericSymbols(file);
     }
 
     // Fallback: if a file has no extracted top-level symbols, represent the file itself as a module node

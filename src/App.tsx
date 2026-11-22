@@ -547,7 +547,7 @@ export default function App() {
             )}
             <span className="truncate">
               已從「{importReport.sourceLabel}」載入 <strong>{importReport.loadedCount}</strong> 個程式檔
-              {importReport.skippedUnsupported > 0 && ` · 略過 ${importReport.skippedUnsupported} 個非程式檔`}
+              {importReport.skippedUnsupported > 0 && ` · 略過 ${importReport.skippedUnsupported} 個二進位或非文字檔`}
               {importReport.skippedOversized > 0 && ` · 略過 ${importReport.skippedOversized} 個超過 1.5MB 大檔`}
               {importReport.truncatedByLimit > 0 &&
                 ` · 另有 ${importReport.truncatedByLimit} 個檔案超過瀏覽器 80 檔上限（大型專案建議改用右側「命令列腳本」或「1個工具自動切」完整掃描）`}
