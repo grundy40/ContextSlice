@@ -19,10 +19,9 @@
    - [OpenCode / Pi Agent / Claude Code 通用 1-Tool MCP](#51-opencode--pi-agent--claude-code-通用-1-tool-mcp)
    - [網頁版 AI 直接複製貼上（附提問模板）](#52-網頁版-ai-直接複製貼上附提問模板)
 6. [專案結構與隱私安全](#6-專案結構與隱私安全)
-7. [Agensi 免費技能上架](#7-agensi-免費技能上架)
-8. [在 AI 對話中如何提問?](#8-在-ai-對話中如何提問)
-9. [版本更新紀錄](#9-版本更新紀錄)
-10. [授權條款](#10-授權條款)
+7. [在 AI 對話中如何提問?](#7-在-ai-對話中如何提問)
+8. [版本更新紀錄](#8-版本更新紀錄)
+9. [授權條款](#9-授權條款)
 
 ---
 
@@ -151,31 +150,7 @@ npm run build
 
 ---
 
-## 7. Agensi 免費技能上架
-
-ContextSlice 已經上架為 Agensi.io 上的免費 AI Agent 技能，讓你的 Claude Code、Copilot 等 AI 編碼工具能自動使用 ContextSlice 進行 Token 節省。
-
-### 📥 下載方式
-
-**方式 1：直接下載 MCP 服務（推薦）**
-```bash
-# 執行完這個指令後，你的 AI 編碼工具就會自動在每次分析程式碼時，先呼叫 ContextSlice
-claude mcp add --scope user context-slice -- node /path/to/tools/ctxslice-mcp.mjs
-```
-
-**方式 2：到 Agensi 平台搜尋**
-訪問 https://www.agensi.io ，搜尋 `context-slice` 即可下載。
-
-### 💡 上架後的好處：
-
-1. **免費**：不用付錢，就能使用
-2. **自動化**：AI 編碼工具自動调用，不需要手動操作
-3. **隱私**：所有處理都在本機完成
-4. **跨工具**：支援 Claude Code、Copilot、Cursor、OpenCode 等 20+ 個 AI 編碼工具
-
----
-
-## 8. 在 AI 對話中如何提問？
+## 7. 在 AI 對話中如何提問？
 
 如果你在使用 ChatGPT、Claude Web、Gemini 等對話框時想用 ContextSlice 預處理程式碼，可以這樣做：
 
@@ -215,7 +190,7 @@ claude mcp add --scope user context-slice -- node /path/to/tools/ctxslice-mcp.mj
 
 ---
 
-## 9. 版本更新紀錄
+## 8. 版本更新紀錄
 
 ### v0.1.2（2026-11-22）
 
@@ -229,7 +204,7 @@ claude mcp add --scope user context-slice -- node /path/to/tools/ctxslice-mcp.mj
 
 ---
 
-## 10. 授權條款
+## 9. 授權條款
 
 本專案採用 [MIT License](./LICENSE) 開源授權。
 
