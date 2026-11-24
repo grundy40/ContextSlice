@@ -54,8 +54,8 @@ const PROMPT_TEMPLATES: Array<{ id: PromptTemplateKind; label: string }> = [
 ];
 
 const TOOL_DIR_PRESETS = [
-  { label: 'Windows', value: 'D:/tools' },
   { label: '專案內', value: './tools' },
+  { label: '個人目錄', value: '~/.contextslice/tools' },
   { label: 'Mac / Linux', value: '/opt/tools' },
 ];
 
@@ -369,7 +369,7 @@ export function UniversalOutputPanel({
               type="text"
               value={toolDir}
               onChange={(e) => onChangeToolDir(e.target.value)}
-              placeholder="例如 D:/tools 或 /opt/tools"
+              placeholder="例如 ./tools 或 ~/.contextslice/tools"
               className="w-full h-7 px-2.5 bg-[#0B0F17] border border-slate-700/80 rounded text-[11px] font-mono text-slate-100 focus:outline-none focus:border-sky-400"
             />
           </div>

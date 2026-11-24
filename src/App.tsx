@@ -94,7 +94,7 @@ export default function App() {
   const [outputTarget, setOutputTarget] = useState<OutputTarget>(
     savedPrefs.outputTarget ?? 'browser',
   );
-  const [toolDir, setToolDir] = useState<string>(savedPrefs.toolDir || 'D:/tools');
+  const [toolDir, setToolDir] = useState<string>(savedPrefs.toolDir || './tools');
   const [promptTemplate, setPromptTemplate] = useState<PromptTemplateKind>(
     savedPrefs.promptTemplate ?? 'fix',
   );

@@ -6,8 +6,8 @@ export interface GeneratorConfig {
 }
 
 function normalizeToolDir(toolDir?: string): string {
-  const cleaned = (toolDir || 'D:/tools').trim().replace(/\\/g, '/').replace(/\/+$/, '');
-  return cleaned || 'D:/tools';
+  const cleaned = (toolDir || './tools').trim().replace(/\\/g, '/').replace(/\/+$/, '');
+  return cleaned || './tools';
 }
 
 export function generateCliScript(config: GeneratorConfig): string {
