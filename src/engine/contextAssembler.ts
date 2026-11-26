@@ -14,6 +14,16 @@ import {
   invokeSkeletonExpansionMcpTool,
 } from './skeletonExpansion';
 
+import { tokenizeCJK2gram, bilingualLookup } from './cjkTokenizer';
+
+/** CJK 字符檢測正則 */
+const CJK_REGEX = /[一-鿿぀-ゟ゠-ヿ가-힯]/;
+
+/** 檢測文本是否包含 CJK 字符 */
+function containsCJK(text: string): boolean {
+  return CJK_REGEX.test(text);
+}
+
 const BILINGUAL_KEYWORDS: Array<[RegExp, string[]]> = [
   [/折扣|優惠|折價|coupon|discount/i, ['discount', 'coupon', 'promo', 'applydiscount', 'validatecoupon']],
   [/庫存|存貨|鎖定|競態|inventory|stock|lock/i, ['inventory', 'stock', 'lock', 'acquire', 'release', 'reserve']],
@@ -33,15 +43,31 @@ function expandQueryTerms(query: string): string[] {
   if (!trimmed) return [];
 
   const tokens = new Set<string>();
+
+  // 1. ASCII 部分
   const asciiParts = trimmed.toLowerCase().match(/[a-z0-9_]+/g) ?? [];
   for (const p of asciiParts) {
     if (p.length >= 2) tokens.add(p);
   }
 
+  // 2. Bilingual 關鍵字映射
   for (const [pattern, synonyms] of BILINGUAL_KEYWORDS) {
     if (pattern.test(trimmed)) {
       for (const s of synonyms) tokens.add(s);
     }
+  }
+
+  // 3. CJK 2-gram 分詞
+  if (containsCJK(trimmed)) {
+    const cjkTerms = tokenizeCJK2gram(trimmed);
+    cjkTerms.forEach(term => tokens.add(term));
+  }
+
+  // 4. 雙語查詢擴展
+  const allTerms = Array.from(tokens);
+  for (const term of allTerms) {
+    const bilingual = bilingualLookup(term);
+    bilingual.forEach(t => tokens.add(t));
   }
 
   return Array.from(tokens);
@@ -56,28 +82,55 @@ export function scoreNodeRelevance(node: AstSymbolNode, queryTerms: string[]): n
   const haystackBody = node.fullCode.toLowerCase();
 
   let score = 0;
+  // CJK 權重調整因子：中文/日文/韓文匹配略高於ASCII
+  const isCjkMatch = /[一-鿿぀-ゟ゠-ヿ가-힯]/.test(queryTerms.join(''));
+  const cjkWeight = isCjkMatch ? 1.15 : 1;  // CJK 查詢時，權重提升 15%
+
   for (const term of queryTerms) {
-    if (haystackName === term) score += 28;
-    else if (haystackName.includes(term)) score += 16;
+    // 1. 名稱精確匹配
+    if (haystackName === term) {
+      score += isCjkMatch ? 32 : 28;  // CJK: 32, ASCII: 28
+    }
+    else if (haystackName.includes(term)) {
+      score += isCjkMatch ? 18 : 16;  // CJK: 18, ASCII: 16
+    }
 
-    if (haystackPath.includes(term)) score += 8;
-    if (haystackDoc.includes(term)) score += 6;
+    // 2. 路徑匹配
+    if (haystackPath.includes(term)) {
+      score += isCjkMatch ? 9 : 8;
+    }
 
-    // Count bounded occurrences in body (BM25-like saturation)
+    // 3. 註解/Docstring 匹配
+    if (haystackDoc.includes(term)) {
+      score += isCjkMatch ? 7 : 6;
+    }
+
+    // 4. 函式體內文本語義匹配 (BM25-like saturation)
     const occ = haystackBody.split(term).length - 1;
     if (occ > 0) {
       score += Math.min(12, 3 * Math.log1p(occ) * 2.5);
     }
   }
 
-  // Slight preference for callable functions/methods over pure passive interfaces when searching tasks
+  // 5. 偏好函式/方法：CJK 查詢時更懷疑名稱匹配
   if (score > 0 && (node.kind === 'function' || node.kind === 'method')) {
-    score *= 1.15;
+    score *= isCjkMatch ? 1.08 : 1.15;  // CJK: 1.08x, ASCII: 1.15x
+  }
+
+  // 6. CJK 中英雙語查詢加成
+  if (isCjkMatch) {
+    const englishTerms = queryTerms.filter(t => /^[a-z0-9_]+$/.test(t));
+    if (englishTerms.length > 0) {
+      // 若有英文詞在中英雙語映射表中，檢查名稱是否匹配
+      const hasEnglishMatch = englishTerms.some(eTerm => 
+        haystackName.includes(eTerm) || haystackDoc.includes(eTerm)
+      );
+      if (hasEnglishMatch) score *= 1.10;  // 雙語匹配加成 10%
+    }
   }
 
   return Number(score.toFixed(2));
 }
-
 export interface AssembleOptions {
   workspace: ParsedWorkspace;
   query: string;

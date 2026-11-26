@@ -24,6 +24,63 @@ export function generateCliScript(config: GeneratorConfig): string {
 import fs from 'node:fs';
 import path from 'node:path';
 
+// --- CJK (Chinese/Japanese/Korean) lightweight 2-gram tokenizer + bilingual map (50 entries) ---
+const CJK_RE = /[一-鿿぀-ゟ゠-ヿ가-힯]/;
+const CJK_RUN_RE = new RegExp('[一-鿿぀-ゟ゠-ヿ가-힯]+', 'g');
+const CJK_WORDS = {
+  "登录": ["login", "auth"], "认证": ["auth", "verify"], "验证": ["verify", "validate"], "解析": ["parse"],
+  "数据": ["data"], "转换": ["convert", "transform"], "处理": ["handle", "process"], "执行": ["execute", "run"],
+  "获取": ["get", "fetch"], "存储": ["store", "save"], "保存": ["save", "persist"], "设置": ["set", "config"],
+  "配置": ["config", "setting"], "连接": ["connect", "connection"], "网络": ["network"], "更新": ["update"],
+  "同步": ["sync"], "异步": ["async"], "错误": ["error"], "失败": ["fail", "failure"],
+  "成功": ["success"], "用户": ["user"], "编辑": ["edit"], "删除": ["delete", "remove"],
+  "新增": ["add", "create"], "修改": ["modify", "change"], "查询": ["query", "search"], "搜索": ["search"],
+  "查找": ["find", "search"], "模块": ["module"], "组件": ["component"], "函数": ["function", "func"],
+  "接口": ["interface", "api"], "服务": ["service"], "路径": ["path"], "文件": ["file"],
+  "目录": ["directory", "dir"], "缓存": ["cache"], "日志": ["log"], "调试": ["debug"],
+  "测试": ["test"], "安全": ["security"], "权限": ["permission", "auth"], "令牌": ["token"],
+  "加密": ["encrypt"], "解密": ["decrypt"], "提交": ["commit", "submit"], "回滚": ["rollback"],
+  "事务": ["transaction"], "超时": ["timeout"]
+};
+const EN_CJK = {};
+for (const zh in CJK_WORDS) { for (const en of CJK_WORDS[zh]) { if (!EN_CJK[en]) EN_CJK[en] = []; EN_CJK[en].push(zh); } }
+function containsCJK(s) { return CJK_RE.test(s); }
+function tokenizeCJK2gram(text) {
+  const runs = String(text || '').match(CJK_RUN_RE) || [];
+  const out = [];
+  for (const run of runs) {
+    let i = 0;
+    while (i < run.length) {
+      if (i + 1 < run.length) { out.push(run[i] + run[i + 1]); i += 2; }
+      else { out.push(run[i]); i += 1; }
+    }
+  }
+  return out;
+}
+function bilingualLookup(term) {
+  const out = [];
+  if (CJK_WORDS[term]) out.push(...CJK_WORDS[term]);
+  if (EN_CJK[term]) out.push(...EN_CJK[term]);
+  return out;
+}
+function expandQueryTerms(query) {
+  const q = String(query || '').toLowerCase();
+  const terms = new Set(q.split(/\\s+/).filter(Boolean));
+  const asciiParts = q.match(/[a-z0-9_]+/g) || [];
+  for (const p of asciiParts) {
+    if (p.length >= 2) terms.add(p);
+    for (const t of bilingualLookup(p)) terms.add(t);
+  }
+  if (containsCJK(q)) {
+    for (const gram of tokenizeCJK2gram(q)) {
+      terms.add(gram);
+      for (const t of bilingualLookup(gram)) terms.add(t);
+    }
+    for (const run of q.match(CJK_RUN_RE) || []) terms.add(run);
+  }
+  return [...terms].filter(Boolean);
+}
+
 const args = process.argv.slice(2);
 const rootFlag = args.indexOf('--root');
 const targetRoot = rootFlag !== -1 && args[rootFlag + 1] ? path.resolve(args[rootFlag + 1]) : process.cwd();
@@ -119,7 +176,7 @@ function skeletonizeCode(code, ext) {
 }
 
 const files = walk(targetRoot);
-const terms = query.toLowerCase().split(/\\s+/).filter(Boolean);
+const terms = expandQueryTerms(query);
 const scored = files.map((filePath) => {
   const buf = fs.readFileSync(filePath);
   if (isBinaryBuffer(buf)) return null;
@@ -205,6 +262,63 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 
+// --- CJK (Chinese/Japanese/Korean) lightweight 2-gram tokenizer + bilingual map (50 entries) ---
+const CJK_RE = /[一-鿿぀-ゟ゠-ヿ가-힯]/;
+const CJK_RUN_RE = new RegExp('[一-鿿぀-ゟ゠-ヿ가-힯]+', 'g');
+const CJK_WORDS = {
+  "登录": ["login", "auth"], "认证": ["auth", "verify"], "验证": ["verify", "validate"], "解析": ["parse"],
+  "数据": ["data"], "转换": ["convert", "transform"], "处理": ["handle", "process"], "执行": ["execute", "run"],
+  "获取": ["get", "fetch"], "存储": ["store", "save"], "保存": ["save", "persist"], "设置": ["set", "config"],
+  "配置": ["config", "setting"], "连接": ["connect", "connection"], "网络": ["network"], "更新": ["update"],
+  "同步": ["sync"], "异步": ["async"], "错误": ["error"], "失败": ["fail", "failure"],
+  "成功": ["success"], "用户": ["user"], "编辑": ["edit"], "删除": ["delete", "remove"],
+  "新增": ["add", "create"], "修改": ["modify", "change"], "查询": ["query", "search"], "搜索": ["search"],
+  "查找": ["find", "search"], "模块": ["module"], "组件": ["component"], "函数": ["function", "func"],
+  "接口": ["interface", "api"], "服务": ["service"], "路径": ["path"], "文件": ["file"],
+  "目录": ["directory", "dir"], "缓存": ["cache"], "日志": ["log"], "调试": ["debug"],
+  "测试": ["test"], "安全": ["security"], "权限": ["permission", "auth"], "令牌": ["token"],
+  "加密": ["encrypt"], "解密": ["decrypt"], "提交": ["commit", "submit"], "回滚": ["rollback"],
+  "事务": ["transaction"], "超时": ["timeout"]
+};
+const EN_CJK = {};
+for (const zh in CJK_WORDS) { for (const en of CJK_WORDS[zh]) { if (!EN_CJK[en]) EN_CJK[en] = []; EN_CJK[en].push(zh); } }
+function containsCJK(s) { return CJK_RE.test(s); }
+function tokenizeCJK2gram(text) {
+  const runs = String(text || '').match(CJK_RUN_RE) || [];
+  const out = [];
+  for (const run of runs) {
+    let i = 0;
+    while (i < run.length) {
+      if (i + 1 < run.length) { out.push(run[i] + run[i + 1]); i += 2; }
+      else { out.push(run[i]); i += 1; }
+    }
+  }
+  return out;
+}
+function bilingualLookup(term) {
+  const out = [];
+  if (CJK_WORDS[term]) out.push(...CJK_WORDS[term]);
+  if (EN_CJK[term]) out.push(...EN_CJK[term]);
+  return out;
+}
+function expandQueryTerms(query) {
+  const q = String(query || '').toLowerCase();
+  const terms = new Set(q.split(/\\s+/).filter(Boolean));
+  const asciiParts = q.match(/[a-z0-9_]+/g) || [];
+  for (const p of asciiParts) {
+    if (p.length >= 2) terms.add(p);
+    for (const t of bilingualLookup(p)) terms.add(t);
+  }
+  if (containsCJK(q)) {
+    for (const gram of tokenizeCJK2gram(q)) {
+      terms.add(gram);
+      for (const t of bilingualLookup(gram)) terms.add(t);
+    }
+    for (const run of q.match(CJK_RUN_RE) || []) terms.add(run);
+  }
+  return [...terms].filter(Boolean);
+}
+
 const TOOL_DEF = {
   name: 'get_context_slice',
   description:
@@ -213,7 +327,7 @@ const TOOL_DEF = {
   inputSchema: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: 'Task or symbol keywords (prefer English identifiers or mixed terms)' },
+      query: { type: 'string', description: 'Task or symbol keywords. English, Chinese, Japanese, Korean supported (CJK 2-gram + bilingual zh-en matching)' },
       projectPath: { type: 'string', description: 'Absolute path to target project folder (e.g. D:\\\\src\\\\my-project)' },
       budget: { type: 'number', description: 'Max token budget (default ${config.budgetTokens})' },
       autoExpand: { type: 'boolean', description: 'Auto-expand high-complexity skeleton clusters to resolve context gaps (default true)' }
@@ -479,7 +593,7 @@ function expandSkeletonCluster(symbols, projectPath, budget = ${config.budgetTok
 function sliceProject(query, projectPath, budget = ${config.budgetTokens}, autoExpand = true) {
   const root = projectPath ? path.resolve(projectPath) : (process.env.WORKSPACE_ROOT || process.cwd());
   if (!fs.existsSync(root)) return \`Error: projectPath not found: \${root}\`;
-  const terms = String(query).toLowerCase().split(/\\s+/).filter(Boolean);
+  const terms = expandQueryTerms(String(query));
   const allBlocks = collectProjectBlocks(root).map((b) => {
     const lower = b.full.toLowerCase();
     const score = terms.reduce((s, t) => s + (b.name.toLowerCase().includes(t) ? 16 : 0) + (lower.split(t).length - 1) * 3, 0);
