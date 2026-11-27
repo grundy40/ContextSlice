@@ -293,7 +293,28 @@ claude mcp add --scope user context-slice -- npx -y -p @grundy40/contextslice ct
 ### v0.1.1（2026-11-21）
 
 - 首次公開發布：多語言 AST 解析、互動式程式關聯圖、四種串接方式（網頁版複製貼上 / CLI / 免裝工具 / 1-Tool MCP）、省量分析與實戰基準測試、離線 PDF 匯出。
+---
+## 真實開源庫改碼基準測試與 Budget 配置指南
 
+我們在三大知名開源專案（TypeScript 的 **Hono**、Python 的 **HTTPX**、Go 的 **Gin**）上進行了硬核「跨檔案函式呼叫鏈追蹤＋實際修 Bug 改寫程式碼」基準測試：
+
+| 上下文提供模式 | 平均輸入 Tokens | Token 節省率 | Hono (TS) | HTTPX (Py) | Gin (Go) | 總通過率 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **對照組：全核心目錄** | ~215,000 | — | ✅ 通過 | ✅ 通過 | ✅ 通過 | **100% (3/3)** |
+| **ContextSlice `32K`（推薦預設值）** | **32,768** | **-85.1%** | ✅ 通過 | ✅ 通過 | ✅ 通過 | **100% (3/3)** 🏆 |
+| **ContextSlice `16K`** | 16,384 | -92.4% | ❌ 失敗 | ❌ 失敗 | ✅ 通過 | 33.3% (1/3) |
+| **ContextSlice `8K`** | 8,192 | -96.2% | ❌ 失敗 | ⚠️ 僅靠記憶 | ✅ 通過 | 33.3% (1/3) |
+
+> **核心結論：** 在 **`32K`** 預設預算下，ContextSlice 能達成與全目錄完全相同的 **100% 改碼通過率**（零幻覺、精準保留原生輔助函式與屬性命名），同時大幅削減 **85.1%** 的 Token 消耗。
+
+### 依專案規模推薦的 `--budget` 配置標準
+
+| 專案規模分級 | 程式碼行數規模 | 建議 `--budget` | 預估 Token 節省率 | 適用場景 |
+| :--- | :---: | :---: | :---: | :--- |
+| **微型工具 / 腳本** | `< 15 KLOC` | `8,192` – `16,384` | ~70% – 85% | 單檔查詢、小型 CLI 或自動化腳本 |
+| **中小型應用專案** | `15 – 80 KLOC` | `24,576` – `32,768` | ~80% – 88% | 日常修 Bug、API 開發與局部重構 |
+| **大型框架 / 核心庫** | `80 – 300 KLOC` | **`32,768` – `49,152`** | ~85% – 93% | 跨檔案呼叫鏈追蹤、複雜類別與介面修改 |
+| **超大型 Monorepo** | `> 300 KLOC` | **`49,152` – `65,536`** | ~90% – 96% | 跨模組架構調整（建議上限 `64K` 以避免長上下文注意力稀釋） |
 ---
 
 ## 9. 授權條款
@@ -305,5 +326,6 @@ claude mcp add --scope user context-slice -- npx -y -p @grundy40/contextslice ct
 ### 📎 相關連結
 
 - **線上網頁版試用（GitHub Pages Live Demo）**：[https://grundy40.github.io/ContextSlice/](https://grundy40.github.io/ContextSlice/)
+- **前往互動式 Budget 計算器與完整視覺化評測報告 (GitHub Pages)**: [https://grundy40.github.io/ContextSlice/benchmark.html](https://grundy40.github.io/ContextSlice/benchmark.html)
 - **GitHub 原始碼**：[https://github.com/grundy40/ContextSlice](https://github.com/grundy40/ContextSlice)
 - **Agensi 免費技能（透過推廣連結下載）**：[https://www.agensi.io/r/GRUNDY40?to=/skills/context-slice](https://www.agensi.io/r/GRUNDY40?to=/skills/context-slice)

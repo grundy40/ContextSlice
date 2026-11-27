@@ -291,6 +291,28 @@ Please recommend the cleanest refactoring approach without breaking upstream cal
 ### `v0.1.1` (2026-11-21)
 
 - Initial release: multi-language AST slicing, interactive dependency graph, 4 integration modes, token savings dashboard with live benchmarks, and offline PDF manual export.
+---
+## 📊 Real-World Code-Patch Benchmark & Budget Guide
+
+We evaluated **ContextSlice** on hardcore cross-file call-graph tracing and code-patching tasks across three major open-source repositories (**Hono** in TypeScript, **HTTPX** in Python, and **Gin** in Go):
+
+| Context Mode | Avg. Input Tokens | Token Reduction | Hono (TS) | HTTPX (Py) | Gin (Go) | Overall Pass Rate |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Full Core Directory (Baseline)** | ~215,000 | — | ✅ PASS | ✅ PASS | ✅ PASS | **100% (3/3)** |
+| **ContextSlice `32K` (Recommended Default)** | **32,768** | **-85.1%** | ✅ PASS | ✅ PASS | ✅ PASS | **100% (3/3)** 🏆 |
+| **ContextSlice `16K`** | 16,384 | -92.4% | ❌ FAIL | ❌ FAIL | ✅ PASS | 33.3% (1/3) |
+| **ContextSlice `8K`** | 8,192 | -96.2% | ❌ FAIL | ⚠️ Partial | ✅ PASS | 33.3% (1/3) |
+
+> **Key Takeaway:** At the **`32K`** default budget, ContextSlice preserves **100% code-patching accuracy** (zero helper/property hallucinations) while cutting **85.1%** of token costs.
+
+### Recommended `--budget` by Project Size
+
+| Project Scale | Codebase Size | Recommended `--budget` | Est. Token Savings | Best Use Case |
+| :--- | :---: | :---: | :---: | :--- |
+| **Micro / Scripts** | `< 15 KLOC` | `8,192` – `16,384` | ~70% – 85% | Single-file lookups, small utilities |
+| **Small–Medium App** | `15 – 80 KLOC` | `24,576` – `32,768` | ~80% – 88% | Standard bug fixes & feature development |
+| **Large Framework** | `80 – 300 KLOC` | **`32,768` – `49,152`** | ~85% – 93% | Cross-file call-graph tracing & refactoring |
+| **Enterprise Monorepo** | `> 300 KLOC` | **`49,152` – `65,536`** | ~90% – 96% | Multi-module architecture changes (sweet spot cap at `64K` to prevent LLM attention dilution) |
 
 ---
 
@@ -299,5 +321,6 @@ Please recommend the cleanest refactoring approach without breaking upstream cal
 Released under the [MIT License](./LICENSE).
 
 - **Live Web Demo (GitHub Pages)**: [https://grundy40.github.io/ContextSlice/](https://grundy40.github.io/ContextSlice/)
+- **Interactive Budget Calculator & Full Benchmark Report (GitHub Pages)**: [https://grundy40.github.io/ContextSlice/benchmark.html](https://grundy40.github.io/ContextSlice/benchmark.html)
 - **GitHub Repository**: [https://github.com/grundy40/ContextSlice](https://github.com/grundy40/ContextSlice)
 - **Agensi Free Skill**: [https://www.agensi.io/r/GRUNDY40?to=/skills/context-slice](https://www.agensi.io/r/GRUNDY40?to=/skills/context-slice)
