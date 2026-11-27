@@ -1,4 +1,4 @@
-# ContextSlice Studio (`v0.3.2`)
+# ContextSlice Studio (`v0.3.3`)
 
 > **Targeted AST Code Slicing & Token Optimization Workbench for AI Coding**  
 > Before sending source code to an LLM, ContextSlice pinpoints the functions you are editing and traces their upstream/downstream call graph — keeping focal implementations intact while folding neighboring dependencies into compact signature skeletons to slash token usage and eliminate context bloat.
@@ -232,6 +232,10 @@ Please recommend the cleanest refactoring approach without breaking upstream cal
 ---
 
 ## 8. Changelog
+
+### `v0.3.3` (2026-11-27)
+
+- **File Header & Top-Level Constants Preservation**: Added structural file header extraction (`extractFileHeader`, `<file_headers>`) across both the browser engine (`src/engine/contextAssembler.ts`) and standalone CLI / 1-Tool MCP scripts (`src/engine/scriptGenerators.ts`). Whenever any file is sliced into the output, top-level `import` blocks, module constants (e.g., `LANG_STORAGE_KEY`), and type/interface declarations are automatically preserved (up to ~50 lines, stopping cleanly before the first function, class, or >60-line object literal such as `zhTW`/`en`), fixing recall gaps when only partial functions or objects are selected.
 
 ### `v0.3.2` (2026-11-27)
 

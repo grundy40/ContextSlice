@@ -15,6 +15,137 @@ function normalizeToolDir(toolDir?: string): string {
   return cleaned || './tools';
 }
 
+const EXTRACT_FILE_HEADER_SOURCE = String.raw`
+function extractFileHeader(content, maxLines = 50, maxObjectLines = 60) {
+  if (!content) return null;
+  const lines = String(content).replace(/\r\n/g, '\n').split('\n');
+  const limit = Math.min(lines.length, maxLines);
+  const funcOrClassStartRe =
+    /^(?:export\s+(?:default\s+)?)?(?:declare\s+)?(?:async\s+)?(?:function\*?\s+|class\s+)|^(?:async\s+)?def\s+|^func\s+|^(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?(?:fn|struct|impl|trait)\s+|^(?:public|private|protected|internal|static|final|abstract|async|override|\s)*(?:class|record)\s+/;
+  const importOrTypeOrVarRe =
+    /^(?:import\b|export\s+(?:type|interface|const|let|var|enum)\b|type\s+|interface\s+|const\s+|let\s+|var\s+|package\s+|using\s+|from\s+\S+\s+import\b|#include\b|#define\b)/;
+  const stripLineNoise = (line) =>
+    line.replace(/(['"\x60])(?:\\.|(?!\1).)*\1/g, '""').replace(/\/\/.*$|#.*$/g, '');
+
+  const countBlockSpan = (startIdx) => {
+    let depth = 0;
+    let opened = false;
+    const scanMax = Math.min(lines.length, startIdx + maxObjectLines + 5);
+    for (let j = startIdx; j < scanMax; j++) {
+      const clean = stripLineNoise(lines[j]);
+      for (let k = 0; k < clean.length; k++) {
+        const ch = clean[k];
+        if (ch === '{' || ch === '[') {
+          depth++;
+          opened = true;
+        } else if (ch === '}' || ch === ']') {
+          depth--;
+          if (opened && depth <= 0) return j - startIdx + 1;
+        }
+      }
+    }
+    return opened ? maxObjectLines + 1 : 1;
+  };
+
+  let inBlockComment = false;
+  let lastSafeEnd = 0;
+  let i = 0;
+
+  while (i < limit) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+
+    if (inBlockComment) {
+      if (trimmed.includes('*/')) inBlockComment = false;
+      i++;
+      continue;
+    }
+    if (trimmed === '' || trimmed.startsWith('//') || trimmed.startsWith('#')) {
+      i++;
+      continue;
+    }
+    if (trimmed.startsWith('/*')) {
+      if (!trimmed.includes('*/')) inBlockComment = true;
+      i++;
+      continue;
+    }
+
+    if (funcOrClassStartRe.test(trimmed)) break;
+    if (/^(?:export\s+)?(?:const|let|var)\s+[A-Za-z0-9_$]+[^;\n]*=>/.test(trimmed)) break;
+    if (/^(?:export\s+)?(?:const|let|var)\s+[A-Za-z0-9_$]+\s*=\s*(?:async\s*)?\([^)]*$/.test(trimmed)) {
+      const lookahead = lines.slice(i, Math.min(lines.length, i + 6)).join(' ');
+      if (lookahead.includes('=>')) break;
+    }
+    if (
+      !importOrTypeOrVarRe.test(trimmed) &&
+      /^(?:[\w<>[\],*&:.]+\s+)+[A-Za-z_][A-Za-z0-9_]*\s*\([^;]*\)\s*(?:const|override|throws\s+[\w,\s]+)?\s*\{?$/.test(trimmed)
+    ) {
+      break;
+    }
+
+    const cleanLine = stripLineNoise(raw);
+    let netDelta = 0;
+    let hasOpener = false;
+    for (let k = 0; k < cleanLine.length; k++) {
+      if (cleanLine[k] === '{' || cleanLine[k] === '[') {
+        netDelta++;
+        hasOpener = true;
+      } else if (cleanLine[k] === '}' || cleanLine[k] === ']') {
+        netDelta--;
+      }
+    }
+
+    if (hasOpener && netDelta > 0) {
+      const span = countBlockSpan(i);
+      const isImport = /^(?:import|export\s+type\s*\{)/.test(trimmed);
+      if ((!isImport && span > maxObjectLines) || i + span > limit) break;
+      i += span;
+      lastSafeEnd = i;
+      continue;
+    }
+
+    if (
+      /^(?:import|export\s+type|type|const|let|var)\b/.test(trimmed) &&
+      (trimmed.endsWith('(') || trimmed.endsWith('=')) &&
+      i + 1 < limit
+    ) {
+      let j = i + 1;
+      while (j < limit) {
+        const nextT = lines[j].trim();
+        if (nextT.endsWith(')') || nextT.endsWith(';')) {
+          j++;
+          break;
+        }
+        if (
+          nextT === '' ||
+          (!nextT.startsWith('|') && !nextT.startsWith('&') && !nextT.startsWith('"') && !nextT.startsWith("'"))
+        ) {
+          break;
+        }
+        j++;
+      }
+      if (j <= limit) {
+        i = j;
+        lastSafeEnd = i;
+        continue;
+      }
+      break;
+    }
+
+    i++;
+    lastSafeEnd = i;
+  }
+
+  if (lastSafeEnd <= 0) return null;
+  const headerLines = lines.slice(0, lastSafeEnd);
+  while (headerLines.length > 0 && headerLines[headerLines.length - 1].trim() === '') {
+    headerLines.pop();
+  }
+  if (headerLines.length === 0) return null;
+  return { header: headerLines.join('\n'), endLine: headerLines.length };
+}
+`;
+
 const CJK_MULTILINGUAL_WORDS = {
   // Auth / Login (Traditional, Simplified, Japanese, Korean)
   "登": ["login", "auth", "verify", "signin"],
@@ -395,15 +526,20 @@ function extractBlocks(code, ext, fileName) {
   return blocks;
 }
 
+${EXTRACT_FILE_HEADER_SOURCE}
+
 const files = walk(targetRoot);
 const terms = expandQueryTerms(query);
 const allRawBlocks = [];
+const fileHeaders = new Map();
 for (const filePath of files) {
   try {
     const buf = fs.readFileSync(filePath);
     if (isBinaryBuffer(buf)) continue;
     const content = buf.toString('utf8');
     const relPath = path.relative(targetRoot, filePath);
+    const hdr = extractFileHeader(content);
+    if (hdr) fileHeaders.set(relPath, hdr);
     const items = extractBlocks(content, path.extname(filePath), relPath);
     for (const b of items) {
       allRawBlocks.push({
@@ -496,6 +632,8 @@ while (qHead < bfsQ.length) {
 let remaining = budget;
 const out = ['<context_slice root="' + path.basename(targetRoot) + '" version="${SCRIPT_VERSION}" budget="' + budget + '">'];
 const includedIds = new Set();
+const includedFiles = new Set();
+const fullStart1EndLine = new Map();
 const dirBudgetUsed = {};
 const maxDirBudget = budget * 0.65;
 
@@ -512,6 +650,10 @@ for (let i = 0; i < scored.length; i++) {
     remaining -= item.rawTokens;
     dirBudgetUsed[topDir] = curDir + item.rawTokens;
     includedIds.add(key);
+    includedFiles.add(item.filePath);
+    if (item.startLine === 1) {
+      fullStart1EndLine.set(item.filePath, Math.max(fullStart1EndLine.get(item.filePath) || 0, item.endLine));
+    }
     out.push(\`  <!-- FULL: \${item.filePath}:\${item.startLine}-\${item.endLine} (\${item.rawTokens} tokens) -->\`);
     out.push(item.full);
   } else if (item.skelTokens <= remaining && curDir + item.skelTokens <= maxDirBudget) {
@@ -520,6 +662,7 @@ for (let i = 0; i < scored.length; i++) {
       remaining -= item.skelTokens;
       dirBudgetUsed[topDir] = curDir + item.skelTokens;
       includedIds.add(key);
+      includedFiles.add(item.filePath);
       out.push(\`  <!-- SKELETON: \${item.filePath}:\${item.startLine}-\${item.endLine} (\${item.skelTokens} tokens) -->\`);
       out.push(item.skeleton);
     } else {
@@ -528,6 +671,19 @@ for (let i = 0; i < scored.length; i++) {
   } else {
     candidateItems.push(item);
   }
+}
+
+const headerChunks = [];
+for (const fp of includedFiles) {
+  const hdr = fileHeaders.get(fp);
+  if (!hdr) continue;
+  const coveredEnd = fullStart1EndLine.get(fp) || 0;
+  if (coveredEnd >= hdr.endLine) continue;
+  headerChunks.push(\`  <!-- FILE_HEADER: \${fp}:1-\${hdr.endLine} -->\`);
+  headerChunks.push(hdr.header);
+}
+if (headerChunks.length > 0) {
+  out.splice(1, 0, '<file_headers>', ...headerChunks, '</file_headers>');
 }
 
 const omitted = candidateItems.filter(item => item.score > 0 && !includedIds.has(item.filePath + ':' + item.startLine)).slice(0, 3);
@@ -578,6 +734,7 @@ export function generateThinMcpServer(config: Partial<GeneratorConfig> = {}): {
 } {
   const toolDir = normalizeToolDir(config.toolDir);
   const mcpPath = `${toolDir}/ctxslice-mcp.mjs`;
+  const budgetTokens = config.budgetTokens || 32768;
   const maxHops = config.maxHops || 2;
   const serverCode = `#!/usr/bin/env node
 /**
@@ -1082,7 +1239,10 @@ async function collectProjectBlocks(root, scanRoot) {
     }
   }
 
+  ${EXTRACT_FILE_HEADER_SOURCE}
+
   const allBlocks = [];
+  const headerMap = new Map();
   for (const f of files) {
     const rel = path.relative(root, f);
     let stat;
@@ -1096,13 +1256,16 @@ async function collectProjectBlocks(root, scanRoot) {
 
     let items;
     let parserMode = 'regex';
+    let fileHeader = null;
     if (cached && cached.mtime === mtime) {
       items = cached.items;
       parserMode = cached.parserMode || 'regex';
+      fileHeader = cached.header ?? null;
     } else {
       const rawBuf = fs.readFileSync(f);
       if (isBinaryBuffer(rawBuf)) continue;
       const raw = rawBuf.toString('utf8');
+      fileHeader = extractFileHeader(raw);
       const ext = path.extname(f);
       const tsBlocks = await extractBlocksWithTreeSitter(raw, ext, rel);
       if (tsBlocks && tsBlocks.length > 0) {
@@ -1112,8 +1275,9 @@ async function collectProjectBlocks(root, scanRoot) {
         items = extractBlocks(raw, ext, rel);
         parserMode = 'state-machine-regex';
       }
-      FILE_CACHE.set(f, { mtime, parserMode, items });
+      FILE_CACHE.set(f, { mtime, parserMode, items, header: fileHeader });
     }
+    if (fileHeader) headerMap.set(rel, fileHeader);
 
     for (const b of items) {
       allBlocks.push({
@@ -1126,7 +1290,7 @@ async function collectProjectBlocks(root, scanRoot) {
       });
     }
   }
-  return allBlocks;
+  return { blocks: allBlocks, headerMap };
 }
 
 function resolveScanRoot(projectPath, subPath) {
@@ -1146,31 +1310,45 @@ function resolveScanRoot(projectPath, subPath) {
   return { root, scanRoot };
 }
 
-async function expandSkeletonCluster(symbols, projectPath, budget = ${config.budgetTokens}, subPath) {
+async function expandSkeletonCluster(symbols, projectPath, budget = ${budgetTokens}, subPath) {
   try {
     const { root, scanRoot } = resolveScanRoot(projectPath, subPath);
     const wanted = new Set((symbols || []).map((s) => String(s).toLowerCase()));
-    const blocks = await collectProjectBlocks(root, scanRoot);
+    const { blocks, headerMap } = await collectProjectBlocks(root, scanRoot);
     let used = 0;
     const expanded = [];
+    const expandedFiles = new Set();
+    const fullStart1EndLine = new Map();
     for (const b of blocks) {
       const match = wanted.has(b.name.toLowerCase()) || [...wanted].some((w) => b.name.toLowerCase().includes(w) || b.rel.toLowerCase().includes(w));
       if (match && used + b.rawTk <= budget) {
         used += b.rawTk;
+        expandedFiles.add(b.rel);
+        if (b.startLine === 1) {
+          fullStart1EndLine.set(b.rel, Math.max(fullStart1EndLine.get(b.rel) || 0, b.endLine));
+        }
         expanded.push(\`// [\${b.rel}:\${b.startLine}-\${b.endLine}] [MCP: expand_skeleton_cluster]\\n\${b.full}\`);
       }
     }
-    return \`<skeleton_expansion root="\${root}" subPath="\${subPath || ''}" expanded="\${expanded.length}" used="\${used}">\\n\${expanded.join('\\n\\n')}\\n</skeleton_expansion>\`;
+    const headerChunks = [];
+    for (const rel of expandedFiles) {
+      const hdr = headerMap.get(rel);
+      if (!hdr) continue;
+      if ((fullStart1EndLine.get(rel) || 0) >= hdr.endLine) continue;
+      headerChunks.push(\`// [\${rel}:1-\${hdr.endLine}] (file header)\\n\${hdr.header}\`);
+    }
+    const hdrTag = headerChunks.length > 0 ? \`\\n<file_headers>\\n\${headerChunks.join('\\n\\n')}\\n</file_headers>\` : '';
+    return \`<skeleton_expansion root="\${root}" subPath="\${subPath || ''}" expanded="\${expanded.length}" used="\${used}">\${hdrTag}\\n\${expanded.join('\\n\\n')}\\n</skeleton_expansion>\`;
   } catch (err) {
     return \`Error: \${err.message}\`;
   }
 }
 
-async function sliceProject(query, projectPath, budget = ${config.budgetTokens}, autoExpand = true, subPath) {
+async function sliceProject(query, projectPath, budget = ${budgetTokens}, autoExpand = true, subPath) {
   try {
     const { root, scanRoot } = resolveScanRoot(projectPath, subPath);
     const terms = expandQueryTerms(String(query));
-    const blocks = await collectProjectBlocks(root, scanRoot);
+    const { blocks, headerMap } = await collectProjectBlocks(root, scanRoot);
     const totalBlocks = Math.max(1, blocks.length);
     const termDF = {};
     for (const t of terms) {
@@ -1259,6 +1437,8 @@ async function sliceProject(query, projectPath, budget = ${config.budgetTokens},
     const skelCandidates = [];
     const focalNames = new Set();
     const includedIds = new Set();
+    const includedFiles = new Set();
+    const fullStart1EndLine = new Map();
     const candidateItems = [];
     const dirBudgetUsed = {};
     const maxDirBudget = budget * 0.65;
@@ -1275,6 +1455,10 @@ async function sliceProject(query, projectPath, budget = ${config.budgetTokens},
         dirBudgetUsed[topDir] = curDir + b.rawTk;
         focalNames.add(b.name);
         includedIds.add(b.rel + ':' + b.name + '@' + b.startLine);
+        includedFiles.add(b.rel);
+        if (b.startLine === 1) {
+          fullStart1EndLine.set(b.rel, Math.max(fullStart1EndLine.get(b.rel) || 0, b.endLine));
+        }
         fullChunks.push(\`// [\${b.rel}:\${b.startLine}-\${b.endLine}] [\${b.parserMode}]\\n\${b.full}\`);
       } else if (used + b.skelTk <= budget && curDir + b.skelTk <= maxDirBudget) {
         const linked = (hop !== undefined && hop <= ${maxHops}) || b.score > 0;
@@ -1283,6 +1467,7 @@ async function sliceProject(query, projectPath, budget = ${config.budgetTokens},
           dirBudgetUsed[topDir] = curDir + b.skelTk;
           skelCandidates.push({ ...b, linked, hop: hop ?? null });
           includedIds.add(b.rel + ':' + b.name + '@' + b.startLine);
+          includedFiles.add(b.rel);
         } else {
           candidateItems.push(b);
         }
@@ -1303,12 +1488,24 @@ async function sliceProject(query, projectPath, budget = ${config.budgetTokens},
         used += delta;
         dirBudgetUsed[topDir] = curDir + delta;
         autoExpandedNames.push(item.name);
+        if (item.startLine === 1) {
+          fullStart1EndLine.set(item.rel, Math.max(fullStart1EndLine.get(item.rel) || 0, item.endLine));
+        }
         fullChunks.push(\`// [\${item.rel}:\${item.startLine}-\${item.endLine}] [MCP auto-expanded: \${item.lineCount} lines]\\n\${item.full}\`);
       } else {
         const hopNote = item.hop ? \` | \${item.hop}-hop\` : '';
         finalSkelChunks.push(\`// [\${item.rel}:\${item.startLine}-\${item.endLine}] (skeleton\${hopNote})\\n\${item.skeleton}\`);
       }
     }
+
+    const headerChunks = [];
+    for (const rel of includedFiles) {
+      const hdr = headerMap.get(rel);
+      if (!hdr) continue;
+      if ((fullStart1EndLine.get(rel) || 0) >= hdr.endLine) continue;
+      headerChunks.push(\`// [\${rel}:1-\${hdr.endLine}] (file header)\\n\${hdr.header}\`);
+    }
+    const headerTag = headerChunks.length > 0 ? \`\\n<file_headers>\\n\${headerChunks.join('\\n\\n')}\\n</file_headers>\` : '';
 
     const omitted = candidateItems.filter(b => b.score > 0 && !includedIds.has(b.rel + ':' + b.name + '@' + b.startLine)).slice(0, 3);
     const omittedTag = omitted.length > 0
@@ -1317,7 +1514,7 @@ async function sliceProject(query, projectPath, budget = ${config.budgetTokens},
 
     const expandTag = autoExpandedNames.length > 0 ? \` autoExpanded="\${autoExpandedNames.join(',')}"\` : '';
     const subPathTag = subPath ? \` subPath="\${subPath}"\` : '';
-    return \`<context_slice root="\${root}" version="${SCRIPT_VERSION}"\${subPathTag} budget="\${budget}" used="\${used}"\${expandTag}>\\n<skeletons>\\n\${finalSkelChunks.join('\\n')}\\n</skeletons>\\n<focal>\\n\${fullChunks.join('\\n\\n')}\\n</focal>\${omittedTag}\\n</context_slice>\`;
+    return \`<context_slice root="\${root}" version="${SCRIPT_VERSION}"\${subPathTag} budget="\${budget}" used="\${used}"\${expandTag}>\${headerTag}\\n<skeletons>\\n\${finalSkelChunks.join('\\n')}\\n</skeletons>\\n<focal>\\n\${fullChunks.join('\\n\\n')}\\n</focal>\${omittedTag}\\n</context_slice>\`;
   } catch (err) {
     return \`Error: \${err.message}\`;
   }

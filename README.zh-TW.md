@@ -1,4 +1,4 @@
-# ContextSlice Studio (`v0.3.2`)
+# ContextSlice Studio (`v0.3.3`)
 
 > **幫 AI 挑重點、省 Token 的程式結構分析與精簡工作台**  
 > 在把程式碼交給 AI 之前，先自動找出要修改的函式與上下游關聯，將其他無關細節摺疊成「只留名稱與參數的外框」，大幅縮小體積並避免上下文溢位。
@@ -227,6 +227,10 @@ claude mcp add --scope user context-slice -- npx -y -p @grundy40/contextslice ct
 ---
 
 ## 8. 版本更新紀錄
+
+### v0.3.3（2026-11-27）
+
+- **檔案頭部與頂層常數／型別保留（File Header & Top-Level Constants Preservation）**：於瀏覽器核心引擎（`src/engine/contextAssembler.ts`）與獨立 CLI／1-Tool MCP 腳本產生器（`src/engine/scriptGenerators.ts`）同步實裝 `extractFileHeader` 與 `<file_headers>` 區塊。只要檔案有任何程式碼區塊被納入切片，系統會自動保留檔案最頂端的 `import` 區塊、模組頂層常數（如 `LANG_STORAGE_KEY`）與型別／介面宣告（至第一個大型函式、類別或超過 60 行的大型物件字面量為止，上限約 50 行），徹底解決局部切片時遺失頂層設定常數與型別宣告的召回率問題。
 
 ### v0.3.2（2026-11-27）
 

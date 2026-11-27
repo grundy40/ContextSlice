@@ -168,6 +168,162 @@ export interface AssembleOptions {
   locale?: Locale;
 }
 
+/**
+ * Preserves top-of-file imports, module-level constants, and top-level type/interface declarations
+ * up to the first function/class or any object/array literal exceeding 60 lines (capped at ~50 lines).
+ */
+export function extractFileHeader(
+  content: string,
+  maxLines = 50,
+  maxObjectLines = 60,
+): { header: string; endLine: number } | null {
+  if (!content) return null;
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  const limit = Math.min(lines.length, maxLines);
+  const funcOrClassStartRe =
+    /^(?:export\s+(?:default\s+)?)?(?:declare\s+)?(?:async\s+)?(?:function\*?\s+|class\s+)|^(?:async\s+)?def\s+|^func\s+|^(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?(?:fn|struct|impl|trait)\s+|^(?:public|private|protected|internal|static|final|abstract|async|override|\s)*(?:class|record)\s+/;
+  const importOrTypeOrVarRe =
+    /^(?:import\b|export\s+(?:type|interface|const|let|var|enum)\b|type\s+|interface\s+|const\s+|let\s+|var\s+|package\s+|using\s+|from\s+\S+\s+import\b|#include\b|#define\b)/;
+
+  const stripLineNoise = (line: string) =>
+    line
+      .replace(/(['"`])(?:\\.|(?!\1).)*\1/g, '""')
+      .replace(/\/\/.*$|#.*$/g, '');
+
+  const countBlockSpan = (startIdx: number): number => {
+    let depth = 0;
+    let opened = false;
+    const scanMax = Math.min(lines.length, startIdx + maxObjectLines + 5);
+    for (let j = startIdx; j < scanMax; j++) {
+      const clean = stripLineNoise(lines[j]);
+      for (let k = 0; k < clean.length; k++) {
+        const ch = clean[k];
+        if (ch === '{' || ch === '[') {
+          depth++;
+          opened = true;
+        } else if (ch === '}' || ch === ']') {
+          depth--;
+          if (opened && depth <= 0) {
+            return j - startIdx + 1;
+          }
+        }
+      }
+    }
+    return opened ? maxObjectLines + 1 : 1;
+  };
+
+  let inBlockComment = false;
+  let lastSafeEnd = 0;
+  let i = 0;
+
+  while (i < limit) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+
+    if (inBlockComment) {
+      if (trimmed.includes('*/')) inBlockComment = false;
+      i++;
+      continue;
+    }
+
+    if (trimmed === '' || trimmed.startsWith('//') || trimmed.startsWith('#')) {
+      i++;
+      continue;
+    }
+
+    if (trimmed.startsWith('/*')) {
+      if (!trimmed.includes('*/')) inBlockComment = true;
+      i++;
+      continue;
+    }
+
+    if (funcOrClassStartRe.test(trimmed)) break;
+
+    if (/^(?:export\s+)?(?:const|let|var)\s+[A-Za-z0-9_$]+[^;\n]*=>/.test(trimmed)) break;
+    if (/^(?:export\s+)?(?:const|let|var)\s+[A-Za-z0-9_$]+\s*=\s*(?:async\s*)?\([^)]*$/.test(trimmed)) {
+      const lookahead = lines.slice(i, Math.min(lines.length, i + 6)).join(' ');
+      if (lookahead.includes('=>')) break;
+    }
+
+    if (
+      !importOrTypeOrVarRe.test(trimmed) &&
+      /^(?:[\w<>[\],*&:.]+\s+)+[A-Za-z_][A-Za-z0-9_]*\s*\([^;]*\)\s*(?:const|override|throws\s+[\w,\s]+)?\s*\{?$/.test(
+        trimmed,
+      )
+    ) {
+      break;
+    }
+
+    const cleanLine = stripLineNoise(raw);
+    let netDelta = 0;
+    let hasOpener = false;
+    for (let k = 0; k < cleanLine.length; k++) {
+      if (cleanLine[k] === '{' || cleanLine[k] === '[') {
+        netDelta++;
+        hasOpener = true;
+      } else if (cleanLine[k] === '}' || cleanLine[k] === ']') {
+        netDelta--;
+      }
+    }
+
+    if (hasOpener && netDelta > 0) {
+      const span = countBlockSpan(i);
+      const isImport = /^(?:import|export\s+type\s*\{)/.test(trimmed);
+      if ((!isImport && span > maxObjectLines) || i + span > limit) {
+        break;
+      }
+      i += span;
+      lastSafeEnd = i;
+      continue;
+    }
+
+    if (
+      /^(?:import|export\s+type|type|const|let|var)\b/.test(trimmed) &&
+      (trimmed.endsWith('(') || trimmed.endsWith('=')) &&
+      i + 1 < limit
+    ) {
+      let j = i + 1;
+      while (j < limit) {
+        const nextT = lines[j].trim();
+        if (nextT.endsWith(')') || nextT.endsWith(';')) {
+          j++;
+          break;
+        }
+        if (
+          nextT === '' ||
+          (!nextT.startsWith('|') &&
+            !nextT.startsWith('&') &&
+            !nextT.startsWith('"') &&
+            !nextT.startsWith("'"))
+        ) {
+          break;
+        }
+        j++;
+      }
+      if (j <= limit) {
+        i = j;
+        lastSafeEnd = i;
+        continue;
+      }
+      break;
+    }
+
+    i++;
+    lastSafeEnd = i;
+  }
+
+  if (lastSafeEnd <= 0) return null;
+  const headerLines = lines.slice(0, lastSafeEnd);
+  while (headerLines.length > 0 && headerLines[headerLines.length - 1].trim() === '') {
+    headerLines.pop();
+  }
+  if (headerLines.length === 0) return null;
+  return {
+    header: headerLines.join('\n'),
+    endLine: headerLines.length,
+  };
+}
+
 export function assembleDynamicContext(options: AssembleOptions): ContextAssemblyResult {
   const {
     workspace,
@@ -442,6 +598,43 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
 
   const packetSections: string[] = [];
   packetSections.push('<context_slice mode="progressive-ast-skeleton">');
+
+  // Preserve top-level imports, constants & types for every file that contributes code blocks
+  const fileById = new Map(workspace.files.map((f) => [f.id, f]));
+  const fullStart1EndLine = new Map<string, number>();
+  for (const p of fullBlocks) {
+    if (p.node.startLine === 1) {
+      fullStart1EndLine.set(
+        p.node.fileId,
+        Math.max(fullStart1EndLine.get(p.node.fileId) ?? 0, p.node.endLine),
+      );
+    }
+  }
+  const seenFileIds = new Set<string>();
+  const preservedHeaders: Array<{ filePath: string; endLine: number; header: string }> = [];
+  for (const p of [...fullBlocks, ...skeletonBlocks]) {
+    if (seenFileIds.has(p.node.fileId)) continue;
+    seenFileIds.add(p.node.fileId);
+    const file = fileById.get(p.node.fileId);
+    if (!file) continue;
+    const hdr = extractFileHeader(file.content);
+    if (!hdr) continue;
+    const coveredEnd = fullStart1EndLine.get(p.node.fileId) ?? 0;
+    if (coveredEnd >= hdr.endLine) continue;
+    preservedHeaders.push({ filePath: file.path, endLine: hdr.endLine, header: hdr.header });
+  }
+
+  if (preservedHeaders.length > 0) {
+    packetSections.push(
+      '  <file_headers note="Top-level imports, module constants, and type declarations preserved for included files">',
+    );
+    for (const h of preservedHeaders) {
+      packetSections.push(`    // [${h.filePath}:1-${h.endLine}] (file header)`);
+      packetSections.push(h.header);
+      packetSections.push('');
+    }
+    packetSections.push('  </file_headers>');
+  }
 
   if (mapBlocks.length > 0) {
     packetSections.push('  <repo_symbol_map>');
