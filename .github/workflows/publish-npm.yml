@@ -1,0 +1,75 @@
+name: Publish @grundy40/contextslice to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Sync version from Git tag
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          node -e "
+            const fs = require('node:fs');
+            const tag = process.env.TAG_NAME || '';
+            const ver = tag.replace(/^v/, '');
+            if (!ver) throw new Error('Missing Git tag version');
+            fs.writeFileSync('src/version.ts', \"export const APP_VERSION = '\" + tag + \"';\\n\", 'utf8');
+            for (const file of ['package.json', 'packages/cli/package.json']) {
+              const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+              json.version = ver;
+              fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\\n', 'utf8');
+            }
+            console.log('Synced versions to', tag, '/', ver);
+          "
+
+      - name: Run TypeScript lint & Vite build
+        run: |
+          npm run lint
+          npm run build
+
+      - name: Build standalone CLI & MCP binaries
+        run: npm run build:cli
+
+      - name: Verify generated CLI & MCP executables
+        run: |
+          node packages/cli/bin/ctxslice.mjs --version
+          node packages/cli/bin/ctxslice-mcp.mjs --version
+          node -e "
+            const { spawnSync } = require('node:child_process');
+            const res = spawnSync('node', ['packages/cli/bin/ctxslice-mcp.mjs'], {
+              input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n',
+              encoding: 'utf8'
+            });
+            if (res.status !== 0 || !res.stdout.includes('get_context_slice')) {
+              console.error(res.stderr || res.stdout);
+              process.exit(1);
+            }
+            console.log('MCP handshake OK');
+          "
+
+      - name: Publish @grundy40/contextslice to npm
+        working-directory: packages/cli
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

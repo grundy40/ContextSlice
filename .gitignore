@@ -100,3 +100,7 @@ desktop.ini
 # AI Studio Internal
 .aistudio/
 public/assets/aistudio/
+
+# Generated Standalone CLI / MCP Artifacts
+packages/cli/bin/
+*.tgz

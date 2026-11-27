@@ -1,0 +1,40 @@
+{
+  "name": "@grundy40/contextslice",
+  "version": "0.3.1",
+  "description": "Zero-dependency multi-language AST code slicer & 1-Tool MCP server for AI coding assistants (Claude Code, OpenCode, Pi Agent, Cursor).",
+  "type": "module",
+  "bin": {
+    "ctxslice": "./bin/ctxslice.mjs",
+    "ctxslice-mcp": "./bin/ctxslice-mcp.mjs"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "ast",
+    "mcp",
+    "context-slice",
+    "ai-coding",
+    "token-optimization",
+    "claude-code",
+    "opencode",
+    "tree-sitter",
+    "call-graph"
+  ],
+  "author": "grundy40",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/grundy40/ContextSlice.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/grundy40/ContextSlice#readme",
+  "bugs": {
+    "url": "https://github.com/grundy40/ContextSlice/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

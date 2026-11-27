@@ -1,4 +1,4 @@
-# ContextSlice Studio (`v0.3.0`)
+# ContextSlice Studio (`v0.3.1`)
 
 > **幫 AI 挑重點、省 Token 的程式結構分析與精簡工作台**  
 > 在把程式碼交給 AI 之前，先自動找出要修改的函式與上下游關聯，將其他無關細節摺疊成「只留名稱與參數的外框」，大幅縮小體積並避免上下文溢位。
@@ -102,11 +102,25 @@ npm run build
 
 右側面板提供「**本機工具存放資料夾**」設定欄位（預設 `./tools`，可一鍵切換 `~/.contextslice/tools` 或 `/opt/tools`），修改後所有設定 JSON 與指令會即時同步更新。
 
-### 5.1 OpenCode / Pi Agent / Claude Code 通用 1-Tool MCP
+### 5.1 免安裝直接執行 `npx` CLI 與 MCP（`@grundy40/contextslice`）
+
+不需手動下載單檔腳本，即可透過 npm 零依賴套件直接執行：
+
+```bash
+# 直接對目前專案執行 CLI 精簡切片
+npx @grundy40/contextslice "login token validation" --budget 32768
+
+# 將 1-Tool MCP 伺服器直接註冊至 Claude Code
+claude mcp add --scope user context-slice -- npx -y -p @grundy40/contextslice ctxslice-mcp
+```
+
+若偏好全域指令，可執行 `npm install -g @grundy40/contextslice` 後直接使用 `ctxslice` 與 `ctxslice-mcp`。
+
+### 5.2 OpenCode / Pi Agent / Claude Code 通用 1-Tool MCP
 
 三套工具可共用同一支零依賴腳本 `ctxslice-mcp.mjs`：
 
-1. 在右側切換至 **`1個工具自動切`** 分頁，填入你的存放路徑並點擊 **「下載工具主檔」** 存成 `ctxslice-mcp.mjs`。
+1. 在右側切換至 **`1個工具自動切`** 分頁，填入你的存放路徑並點擊 **「下載工具主檔」** 存成 `ctxslice-mcp.mjs`（或直接使用上述 `npx -y -p @grundy40/contextslice ctxslice-mcp` 指令）。
 2. 複製分頁提供的 **全域規則** 貼入對應規則檔：
    - **OpenCode**：`~/.config/opencode/AGENTS.md`
    - **Pi Agent**：`~/.pi/agent/AGENTS.md`
@@ -114,7 +128,7 @@ npm run build
 3. 依你使用的工具複製對應設定（OpenCode JSON / Pi JSON / `claude mcp add` 指令）。
 4. 複製分頁中的 **「一鍵測試指令」** 到終端機執行，看到工具列表回傳即代表設定成功。
 
-### 5.2 網頁版 AI 直接複製貼上（附提問模板）
+### 5.3 網頁版 AI 直接複製貼上（附提問模板）
 
 1. 在右側 **`複製貼上`** 分頁選擇想要的提問開頭（`只複製程式碼` / `修 Bug / 改功能` / `幫我解釋邏輯` / `檢查潛在問題`）。
 2. 點擊 **「複製給 AI 的內容」**，直接貼到 ChatGPT、Claude Web 或 Gemini 對話框即可。
@@ -128,8 +142,15 @@ npm run build
 ├── README.zh-TW.md                      # 繁體中文說明文件（Traditional Chinese）
 ├── index.html                           # 頁面進入點與 SEO Metadata
 ├── start.mjs                            # macOS / Linux / Windows 一鍵啟動腳本
-├── package.json                         # 套件與腳本定義
+├── package.json                         # 套件與腳本定義（含 build:cli）
 ├── LICENSE                              # MIT 開源授權
+├── .github/workflows/publish-npm.yml    # 推送 v* 標籤自動發布 npm 工作流
+├── scripts/
+│   └── build-cli.mjs                    # 抽離產生獨立 CLI 與 MCP 執行檔腳本
+├── packages/cli/                        # 零依賴 @grundy40/contextslice npm 套件
+│   ├── package.json                     # bin 映射設定 (ctxslice, ctxslice-mcp)
+│   ├── README.md                        # npm 套件與 npx / Claude Code 英文說明
+│   └── bin/                             # 自動建置產生之單檔執行檔（已列入 .gitignore）
 └── src/
     ├── App.tsx                          # 主介面、偏好記憶、主動補齊、標籤與一鍵整理
     ├── i18n.ts                          # 英／繁中雙語字典、語言自動偵測與 localStorage 記憶
@@ -201,6 +222,12 @@ npm run build
 ---
 
 ## 8. 版本更新紀錄
+
+### v0.3.1（2026-11-27）
+
+- **零外部依賴獨立 npm 套件（`@grundy40/contextslice`）**：建立 `packages/cli/` 套件目錄（零 `dependencies`），配置 `ctxslice` 與 `ctxslice-mcp` 雙 `bin` 入口及英文版套件 `README.md`，支援 `npx @grundy40/contextslice` 即時執行與 `npx -y -p @grundy40/contextslice ctxslice-mcp` 串接 Claude Code。
+- **自動化抽離建置腳本（`scripts/build-cli.mjs`）**：由無瀏覽器 DOM 依賴的 `src/engine/scriptGenerators.ts` 直接抽離輸出具備 `#!/usr/bin/env node` 與可執行權限（`755`）的單檔 `packages/cli/bin/ctxslice.mjs` 及 `ctxslice-mcp.mjs`，於根目錄 `package.json` 新增 `build:cli` 指令並更新 `.gitignore`。
+- **GitHub Actions 自動發布工作流（`.github/workflows/publish-npm.yml`）**：設定推送 `v*` 標籤時自動同步標籤版號、驗證型別與建置並執行 CLI/MCP 實機測試，再透過 `secrets.NPM_TOKEN` 執行 `npm publish --access public`。
 
 ### v0.3.0（2026-11-27）
 

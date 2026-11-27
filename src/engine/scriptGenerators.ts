@@ -114,8 +114,9 @@ const CJK_MULTILINGUAL_WORDS = {
   "테스트": ["test"],
 };
 
-export function generateCliScript(config: GeneratorConfig): string {
+export function generateCliScript(config: Partial<GeneratorConfig> = {}): string {
   const safeQuery = (config.query || 'fix bug').replace(/"/g, '\\"');
+  const budgetTokens = config.budgetTokens || 32768;
   const maxHops = config.maxHops || 2;
   return `#!/usr/bin/env node
 /**
@@ -172,10 +173,21 @@ if (args.includes('--version') || args.includes('-v')) {
   process.stdout.write('ctxslice ${APP_VERSION}\\n');
   process.exit(0);
 }
+if (args.includes('--help') || args.includes('-h')) {
+  process.stdout.write(
+    'ContextSlice CLI ${APP_VERSION} — Zero-Config Multi-Language AST Slicer\\n\\n' +
+    'Usage:\\n  ctxslice "<query>" [--root <dir>] [--budget <tokens>]\\n\\n' +
+    'Options:\\n  --root <dir>     Target repository path (default: current directory)\\n' +
+    '  --budget <num>   Max token budget (default: ${budgetTokens})\\n' +
+    '  -v, --version    Show version\\n' +
+    '  -h, --help       Show help\\n'
+  );
+  process.exit(0);
+}
 const rootFlag = args.indexOf('--root');
 const targetRoot = rootFlag !== -1 && args[rootFlag + 1] ? path.resolve(args[rootFlag + 1]) : process.cwd();
 const budgetFlag = args.indexOf('--budget');
-const budget = budgetFlag !== -1 ? Number(args[budgetFlag + 1]) : ${config.budgetTokens};
+const budget = budgetFlag !== -1 ? Number(args[budgetFlag + 1]) : ${budgetTokens};
 const skipIdx = new Set([rootFlag, rootFlag + 1, budgetFlag, budgetFlag + 1]);
 const query = args.find((a, idx) => !skipIdx.has(idx) && !a.startsWith('--')) || '${safeQuery}';
 const IGNORE = new Set([
@@ -532,12 +544,13 @@ process.stdout.write(out.join('\\n') + '\\n');
 `;
 }
 
-export function generateZeroMcpDesktopConfig(config: GeneratorConfig): {
+export function generateZeroMcpDesktopConfig(config: Partial<GeneratorConfig> = {}): {
   microRule: string;
   piSkill: string;
   watchCommand: string;
 } {
   const safeQuery = config.query || 'active task';
+  const budgetTokens = config.budgetTokens || 32768;
   const toolDir = normalizeToolDir(config.toolDir);
   const cliPath = `${toolDir}/ctxslice.mjs`;
   const microRule = `# Global Rule:
@@ -547,14 +560,14 @@ When inspecting, debugging, or modifying code in ANY project, ALWAYS run \`node 
 name: context-slice
 description: Global out-of-band multi-language AST code slicing for any active project
 ---
-Run \`node ${cliPath} "$ARGUMENTS" --budget ${config.budgetTokens}\` via bash in the current project directory.`;
+Run \`node ${cliPath} "$ARGUMENTS" --budget ${budgetTokens}\` via bash in the current project directory.`;
 
-  const watchCommand = `node ${cliPath} "${safeQuery}" --budget ${config.budgetTokens}`;
+  const watchCommand = `node ${cliPath} "${safeQuery}" --budget ${budgetTokens}`;
 
   return { microRule, piSkill, watchCommand };
 }
 
-export function generateThinMcpServer(config: GeneratorConfig): {
+export function generateThinMcpServer(config: Partial<GeneratorConfig> = {}): {
   serverCode: string;
   clientConfig: string;
   opencodeConfig: string;
@@ -1384,3 +1397,8 @@ mcp_servers:
 
   return { serverCode, clientConfig, opencodeConfig, claudeCodeCmd, hermesYamlConfig, autoInvokeRule, verifyCommand };
 }
+
+export function generateMcpServerScript(config: Partial<GeneratorConfig> = {}): string {
+  return generateThinMcpServer(config).serverCode;
+}
+

@@ -1,4 +1,4 @@
-# ContextSlice Studio (`v0.3.0`)
+# ContextSlice Studio (`v0.3.1`)
 
 > **Targeted AST Code Slicing & Token Optimization Workbench for AI Coding**  
 > Before sending source code to an LLM, ContextSlice pinpoints the functions you are editing and traces their upstream/downstream call graph — keeping focal implementations intact while folding neighboring dependencies into compact signature skeletons to slash token usage and eliminate context bloat.
@@ -105,11 +105,25 @@ npm run build
 
 The right-hand output panel includes a configurable **Local Tool Directory** field (defaults to `./tools`, with one-click presets for `~/.contextslice/tools` and `/opt/tools`). Updating this path syncs all generated JSON configs and CLI commands in real time.
 
-### 5.1 Universal 1-Tool MCP for OpenCode / Pi Agent / Claude Code
+### 5.1 Zero-Setup `npx` CLI & MCP (`@grundy40/contextslice`)
+
+Run ContextSlice anywhere directly from npm with **zero runtime dependencies**:
+
+```bash
+# Slice the current repository via CLI
+npx @grundy40/contextslice "login token validation" --budget 32768
+
+# Register the 1-Tool MCP server in Claude Code
+claude mcp add --scope user context-slice -- npx -y -p @grundy40/contextslice ctxslice-mcp
+```
+
+Or install globally (`npm install -g @grundy40/contextslice`) to invoke `ctxslice` and `ctxslice-mcp` directly.
+
+### 5.2 Universal 1-Tool MCP for OpenCode / Pi Agent / Claude Code
 
 All three agent environments share the same single-file, zero-dependency server `ctxslice-mcp.mjs`:
 
-1. Open the **`1-Tool MCP`** tab in the right-hand panel, set your preferred tool folder, and click **Download Server Script** to save `ctxslice-mcp.mjs`.
+1. Open the **`1-Tool MCP`** tab in the right-hand panel, set your preferred tool folder, and click **Download Server Script** to save `ctxslice-mcp.mjs` (or use `npx -y -p @grundy40/contextslice ctxslice-mcp` as shown above).
 2. Copy the provided **Global Agent Rule** into your agent's instruction file:
    - **OpenCode**: `~/.config/opencode/AGENTS.md`
    - **Pi Agent**: `~/.pi/agent/AGENTS.md`
@@ -117,12 +131,12 @@ All three agent environments share the same single-file, zero-dependency server 
 3. Copy the matching registration snippet (`OpenCode JSON`, `Pi JSON`, or `claude mcp add` command).
 4. Run the provided **One-Click Verify Command** in your terminal (`--version` / `tools/list` JSON-RPC handshake) to confirm the MCP server responds properly.
 
-### 5.2 CLI & Zero-Install Modes
+### 5.3 CLI & Zero-Install Modes
 
-- **CLI Mode (`ctxslice.mjs`)**: Download a standalone local script (`node ctxslice.mjs "your query" --budget 32768`) to slice any repository from your terminal or CI pipeline without running the browser UI.
+- **CLI Mode (`ctxslice.mjs` / `npx @grundy40/contextslice`)**: Run a standalone local script (`node ctxslice.mjs "your query" --budget 32768`) to slice any repository from your terminal or CI pipeline without running the browser UI.
 - **Zero-Install Mode (Zero-MCP)**: Generates an ultra-lean micro-rule (`AGENTS.md`) and `SKILL.md` so agent runners can invoke `ctxslice.mjs` via bash with near-zero schema overhead.
 
-### 5.3 Web UI Copy & Paste (with Prompt Templates)
+### 5.4 Web UI Copy & Paste (with Prompt Templates)
 
 1. Open the **`Web Copy`** tab on the right and choose a prompt template (`Code Only` / `Bug Fix / Feature` / `Explain Logic` / `Audit Issues`).
 2. Click **Copy Prompt for AI** and paste directly into ChatGPT, Claude Web, or Gemini.
@@ -136,8 +150,15 @@ All three agent environments share the same single-file, zero-dependency server 
 ├── README.zh-TW.md                      # Traditional Chinese documentation
 ├── index.html                           # HTML entry point & SEO metadata
 ├── start.mjs                            # Cross-platform one-click launcher
-├── package.json                         # Dependencies & npm scripts
+├── package.json                         # Dependencies & npm scripts (incl. build:cli)
 ├── LICENSE                              # MIT License
+├── .github/workflows/publish-npm.yml    # Automated npm publish on v* Git tags
+├── scripts/
+│   └── build-cli.mjs                    # Extracts standalone CLI & MCP executables
+├── packages/cli/                        # Zero-dependency @grundy40/contextslice npm package
+│   ├── package.json                     # bin mappings (ctxslice, ctxslice-mcp)
+│   ├── README.md                        # npm package & npx / Claude Code guide
+│   └── bin/                             # Generated single-file CLI & MCP binaries (gitignored)
 └── src/
     ├── App.tsx                          # Main workbench, preferences, proactive discovery & layout
     ├── i18n.ts                          # Bilingual en / zh-TW dictionary, auto-detect & persistence
@@ -206,6 +227,12 @@ Please recommend the cleanest refactoring approach without breaking upstream cal
 ---
 
 ## 8. Changelog
+
+### `v0.3.1` (2026-11-27)
+
+- **Standalone Zero-Dependency npm Package (`@grundy40/contextslice`)**: Added `packages/cli/` with zero runtime `dependencies` and `bin` entries for `ctxslice` and `ctxslice-mcp`, enabling direct zero-install `npx @grundy40/contextslice` and Claude Code `npx -y -p @grundy40/contextslice ctxslice-mcp` usage.
+- **Automated CLI Build Pipeline (`scripts/build-cli.mjs`)**: Added `npm run build:cli` to bundle and extract DOM-free `src/engine/scriptGenerators.ts` outputs into executable `packages/cli/bin/ctxslice.mjs` and `packages/cli/bin/ctxslice-mcp.mjs` binaries (`chmod 755`, `--help` & `--version` flags), with generated artifacts added to `.gitignore`.
+- **Automated GitHub Actions Publishing (`.github/workflows/publish-npm.yml`)**: Automatically syncs tag version, verifies TypeScript + Vite + CLI/MCP builds, and publishes `@grundy40/contextslice` with `npm publish --access public` whenever a `v*` tag is pushed.
 
 ### `v0.3.0` (2026-11-27)
 
