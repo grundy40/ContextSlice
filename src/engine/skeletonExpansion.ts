@@ -1,3 +1,4 @@
+import { getMessages, Locale } from '../i18n';
 import {
   ComplexityCluster,
   ComputedNodePlan,
@@ -13,10 +14,12 @@ export function detectHighComplexityClusters(
   workspace: ParsedWorkspace,
   plans: ComputedNodePlan[],
   focalIds: string[],
+  locale: Locale = 'zh-TW',
 ): {
   clusters: ComplexityCluster[];
   complexityByNodeId: Map<string, number>;
 } {
+  const { engine: eng } = getMessages(locale);
   const { edges } = workspace;
   const focalSet = new Set(focalIds);
 
@@ -93,10 +96,10 @@ export function detectHighComplexityClusters(
     if (!qualifiesAsHighComplexity) continue;
 
     const reasons: string[] = [];
-    if (degree >= 2) reasons.push(`跟 ${degree} 個地方有關聯`);
-    if (crossFileEdges >= 1) reasons.push(`跨檔案連用 ${crossFileEdges} 次`);
-    if (foldedLines >= 14) reasons.push(`原本被折疊了 ${foldedLines} 行`);
-    if (hopDistance === 1) reasons.push('直接連到修改重點');
+    if (degree >= 2) reasons.push(eng.clusterDegree(degree));
+    if (crossFileEdges >= 1) reasons.push(eng.clusterCrossFile(crossFileEdges));
+    if (foldedLines >= 14) reasons.push(eng.clusterFoldedLines(foldedLines));
+    if (hopDistance === 1) reasons.push(eng.clusterDirectFocal);
 
     clusters.push({
       clusterId: `cluster_${node.id}`,
@@ -108,7 +111,7 @@ export function detectHighComplexityClusters(
       foldedLines,
       complexityScore,
       currentTier: tier,
-      gapReason: reasons.join(' · ') || '關聯較複雜的重要程式',
+      gapReason: reasons.join(' · ') || eng.clusterFallback,
       tokenCostDelta: tokenDelta,
       resolvedByMcp: false,
     });
@@ -127,6 +130,7 @@ export function invokeSkeletonExpansionMcpTool(params: {
   remainingBudget: number;
   autoExpandEnabled: boolean;
   triggerMode?: 'proactive-discovery' | 'auto-cluster-detector' | 'manual-rescan';
+  locale?: Locale;
 }): {
   expandedNodeIds: string[];
   updatedClusters: ComplexityCluster[];
@@ -138,7 +142,9 @@ export function invokeSkeletonExpansionMcpTool(params: {
     remainingBudget,
     autoExpandEnabled,
     triggerMode = 'proactive-discovery',
+    locale = 'zh-TW',
   } = params;
+  const { engine: eng } = getMessages(locale);
 
   if (clusters.length === 0) {
     return {
@@ -172,7 +178,7 @@ export function invokeSkeletonExpansionMcpTool(params: {
       tokensAdded: 0,
       toolCallRecord: {
         id: `mcp_${Date.now()}`,
-        timestamp: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
+        timestamp: new Date().toLocaleTimeString(eng.timeLocale, { hour12: false }),
         toolName: 'expand_skeleton_cluster',
         triggerMode,
         requestPayload,
@@ -216,7 +222,7 @@ export function invokeSkeletonExpansionMcpTool(params: {
     tokensAdded,
     toolCallRecord: {
       id: `mcp_call_${clusters.length}_${expandedSet.size}`,
-      timestamp: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
+      timestamp: new Date().toLocaleTimeString(eng.timeLocale, { hour12: false }),
       toolName: 'expand_skeleton_cluster',
       triggerMode,
       requestPayload,

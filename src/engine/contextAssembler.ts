@@ -1,3 +1,4 @@
+import { getMessages, Locale } from '../i18n';
 import {
   AstSymbolNode,
   ComputedNodePlan,
@@ -164,6 +165,7 @@ export interface AssembleOptions {
   autoExpandClusters?: boolean;
   proactiveExpandedIds?: string[];
   proactiveToolCall?: McpToolInvocationRecord | null;
+  locale?: Locale;
 }
 
 export function assembleDynamicContext(options: AssembleOptions): ContextAssemblyResult {
@@ -177,7 +179,9 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     autoExpandClusters = true,
     proactiveExpandedIds,
     proactiveToolCall,
+    locale = 'zh-TW',
   } = options;
+  const { engine: eng } = getMessages(locale);
   const { nodes, edges, totalRawTokens } = workspace;
 
   const queryTerms = expandQueryTerms(query);
@@ -277,44 +281,44 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     const relevanceScore = scores.get(node.id) ?? 0;
 
     let tier: NodeTier = 'excluded';
-    let reason = '跟這次要改的重點沒關係，先略過';
+    let reason = eng.reasonDefaultExcluded;
 
     if (override === 'exclude') {
       tier = 'excluded';
-      reason = '你手動設定略過';
+      reason = eng.reasonManualExclude;
     } else if (override === 'full') {
       tier = 'full';
       remainingBudget = Math.max(0, remainingBudget - node.rawTokens);
-      reason = '你手動設定看完整內容';
+      reason = eng.reasonManualFull;
     } else if (override === 'skeleton') {
       tier = 'skeleton';
       remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
-      reason = '你手動設定只留外框';
+      reason = eng.reasonManualSkeleton;
     } else {
       // Automatic 3-tier progressive allocation
       if (isFocal) {
         if (node.rawTokens <= remainingBudget || remainingBudget === budgetTokens - packetOverheadTokens) {
           tier = 'full';
           remainingBudget = Math.max(0, remainingBudget - node.rawTokens);
-          reason = '這是你要改的重點（保留 100% 完整內容）';
+          reason = eng.reasonFocalFull;
         } else if (node.skeletonTokens <= remainingBudget) {
           tier = 'skeleton';
           remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
-          reason = '額度快滿了，重點先縮成外框';
+          reason = eng.reasonFocalSkeleton;
         } else {
           tier = 'map';
           remainingBudget = Math.max(0, remainingBudget - node.mapTokens);
-          reason = '額度不夠了，只留名稱和行號';
+          reason = eng.reasonFocalMap;
         }
       } else if (hop !== null && hop <= maxHops) {
         if (node.skeletonTokens <= remainingBudget) {
           tier = 'skeleton';
           remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
-          reason = `跟重點有直接關聯（隔 ${hop} 層，先留外框給 AI 參考）`;
+          reason = eng.reasonHopSkeleton(hop);
         } else if (node.mapTokens <= remainingBudget) {
           tier = 'map';
           remainingBudget = Math.max(0, remainingBudget - node.mapTokens);
-          reason = `隔 ${hop} 層的相關程式（額度比較緊，先只留位置）`;
+          reason = eng.reasonHopMap(hop);
         }
       } else if (
         (node.kind === 'interface' || node.kind === 'type') &&
@@ -324,11 +328,11 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
         // Same-file types are essential for single-file monolith edits
         tier = 'skeleton';
         remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
-        reason = '同一支檔案裡的資料格式定義（自動保留）';
+        reason = eng.reasonSameFileType;
       } else if (node.exported && node.mapTokens <= remainingBudget * 0.35) {
         tier = 'map';
         remainingBudget = Math.max(0, remainingBudget - node.mapTokens);
-        reason = '其他公開函式的位置清單';
+        reason = eng.reasonExportedMap;
       }
     }
 
@@ -361,6 +365,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     workspace,
     baseNodePlans,
     focalIds,
+    locale,
   );
   const remainingBudgetForExpansion = remainingBudget;
 
@@ -385,6 +390,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
             remainingBudget,
             autoExpandEnabled: false,
             triggerMode: 'proactive-discovery',
+            locale,
           }).toolCallRecord
         : null);
   } else {
@@ -393,6 +399,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
       remainingBudget,
       autoExpandEnabled: autoExpandClusters,
       triggerMode: 'proactive-discovery',
+      locale,
     });
     expandedIds = expansionResult.expandedNodeIds;
     updatedClusters = expansionResult.updatedClusters;
@@ -407,7 +414,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     plan.tier = 'full';
     plan.injectedTokens = plan.node.rawTokens;
     plan.autoExpanded = true;
-    plan.reason = '系統判斷這段很重要且較複雜，已自動補齊完整內容';
+    plan.reason = eng.reasonAutoExpanded;
   }
 
   const nodePlans = nodes.map((n) => {

@@ -1,6 +1,7 @@
 import { KeyboardEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, CornerDownLeft, FileCode2, Search, Sparkles, Target, X } from 'lucide-react';
 import { searchAstSymbolsSemantic, SemanticMatchInfo } from '../engine/semanticSearch';
+import { useI18n } from '../i18n';
 import {
   CodeFile,
   ComputedNodePlan,
@@ -28,13 +29,6 @@ const KIND_ABBR: Record<SymbolKind, string> = {
   type: 'typ',
   const: 'var',
   module: 'mod',
-};
-
-const TIER_LABEL: Record<NodeTier, string> = {
-  full: '給完整',
-  skeleton: '只留外框',
-  map: '只留名稱',
-  excluded: '略過',
 };
 
 const TIER_TEXT_CLASS: Record<NodeTier, string> = {
@@ -79,6 +73,7 @@ export function SymbolExplorer({
   onToggleFocal,
   onCycleOverride,
 }: SymbolExplorerProps) {
+  const { locale, t } = useI18n();
   const [collapsedFiles, setCollapsedFiles] = useState<Record<string, boolean>>({});
   const [symbolFilter, setSymbolFilter] = useState('');
   const [semanticEnabled, setSemanticEnabled] = useState(true);
@@ -97,7 +92,7 @@ export function SymbolExplorer({
   } = useMemo(() => {
     const map = new Map<string, ComputedNodePlan[]>();
     const matchMap: Map<string, SemanticMatchInfo> = normalizedFilter
-      ? searchAstSymbolsSemantic(nodePlans, edges, symbolFilter, semanticEnabled)
+      ? searchAstSymbolsSemantic(nodePlans, edges, symbolFilter, semanticEnabled, locale)
       : new Map();
     const flatIds: string[] = [];
 
@@ -144,7 +139,7 @@ export function SymbolExplorer({
       matchInfoByNodeId: matchMap,
       flatMatchedNodeIds: flatIds,
     };
-  }, [files, nodePlans, edges, symbolFilter, normalizedFilter, semanticEnabled]);
+  }, [files, nodePlans, edges, symbolFilter, normalizedFilter, semanticEnabled, locale]);
 
   useEffect(() => {
     setActiveMatchIndex(0);
@@ -205,18 +200,20 @@ export function SymbolExplorer({
     setCollapsedFiles((prev) => ({ ...prev, [fileId]: !prev[fileId] }));
   };
 
+  const matchCountSummary = t.explorer.matchCount(flatMatchedNodeIds.length, nodePlans.length);
+
   return (
     <aside
-      aria-label="檔案與函式清單"
+      aria-label={t.explorer.aria}
       className="flex-1 flex flex-col min-h-0"
     >
       <div className="px-4 py-3 border-b border-slate-800/80 space-y-2">
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-xs font-semibold text-slate-200 tracking-wide">
-            檔案與函式清單
+            {t.explorer.title}
           </h2>
           <span className="text-[11px] font-mono tabular-nums text-slate-400">
-            {files.length} 檔 · {nodePlans.length} 項
+            {t.explorer.counts(files.length, nodePlans.length)}
           </span>
         </div>
 
@@ -229,11 +226,11 @@ export function SymbolExplorer({
               value={symbolFilter}
               onChange={(e) => setSymbolFilter(e.target.value)}
               onKeyDown={handleSearchKeyDown}
-              aria-label="搜尋函式、變數或語義行為"
+              aria-label={t.explorer.searchAria}
               placeholder={
                 semanticEnabled
-                  ? '搜尋名稱或行為（例：處理雨刷邏輯）'
-                  : '精確搜尋函式、變數或檔名...'
+                  ? t.explorer.searchPlaceholderSemantic
+                  : t.explorer.searchPlaceholderExact
               }
               className="w-full h-7 pl-7 pr-7 bg-[#0B0F17] border border-slate-800 rounded text-[11px] text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-sky-400 transition-colors"
             />
@@ -244,7 +241,7 @@ export function SymbolExplorer({
                   setSymbolFilter('');
                   searchInputRef.current?.focus();
                 }}
-                aria-label="清除搜尋條件"
+                aria-label={t.explorer.clearSearchAria}
                 className="absolute right-1.5 p-0.5 rounded text-slate-500 hover:text-slate-200 hover:bg-slate-800 transition-colors cursor-pointer"
               >
                 <X className="w-3 h-3" />
@@ -256,7 +253,7 @@ export function SymbolExplorer({
             <button
               type="button"
               onClick={() => setSemanticEnabled((v) => !v)}
-              title="開啟後，可依 AST 註解、語義同義詞與呼叫結構關聯模糊搜尋相關節點（即使忘記確切名稱也能找到）"
+              title={t.explorer.semanticTitle}
               className={`px-2 py-0.5 rounded border text-[10.5px] font-medium flex items-center gap-1 transition-colors cursor-pointer ${
                 semanticEnabled
                   ? 'border-sky-500/40 bg-sky-500/15 text-sky-300'
@@ -264,13 +261,13 @@ export function SymbolExplorer({
               }`}
             >
               <Sparkles className="w-2.5 h-2.5 shrink-0" />
-              語義模糊比對：{semanticEnabled ? '開' : '關'}
+              {t.explorer.semanticLabel(semanticEnabled)}
             </button>
 
             {normalizedFilter && flatMatchedNodeIds.length > 0 && (
               <span className="inline-flex items-center gap-1 text-[10.5px] text-slate-500">
                 <CornerDownLeft className="w-2.5 h-2.5" />
-                Enter 聚焦
+                {t.explorer.enterFocus}
               </span>
             )}
           </div>
@@ -279,11 +276,12 @@ export function SymbolExplorer({
         {normalizedFilter && (
           <div className="flex items-center justify-between text-[10.5px] text-slate-400">
             <span className="font-mono tabular-nums">
-              符合 <strong className="text-sky-300">{flatMatchedNodeIds.length}</strong> /{' '}
-              {nodePlans.length} 個節點
+              {matchCountSummary.prefix}
+              <strong className="text-sky-300">{matchCountSummary.matched}</strong>
+              {matchCountSummary.suffix}
             </span>
             {semanticEnabled && (
-              <span className="text-slate-500">依語義與 AST 關聯排序</span>
+              <span className="text-slate-500">{t.explorer.semanticSortHint}</span>
             )}
           </div>
         )}
@@ -292,15 +290,17 @@ export function SymbolExplorer({
       <div className="flex-1 overflow-y-auto py-2">
         {files.length === 0 ? (
           <div className="px-4 py-10 text-center space-y-2">
-            <p className="text-xs font-medium text-slate-300">尚未匯入任何專案檔案</p>
+            <p className="text-xs font-medium text-slate-300">{t.explorer.emptyTitle}</p>
             <p className="text-[11px] text-slate-500 leading-relaxed">
-              請點擊上方「匯入資料夾 / 檔案」，選取本機程式碼或直接貼上程式段落。
+              {t.explorer.emptyDesc}
             </p>
           </div>
         ) : normalizedFilter && flatMatchedNodeIds.length === 0 ? (
           <div className="px-4 py-8 text-center space-y-2">
             <p className="text-xs text-slate-400">
-              找不到符合「<span className="text-slate-200 font-mono">{symbolFilter.trim()}</span>」的函式或變數
+              {t.explorer.noMatchPrefix}
+              <span className="text-slate-200 font-mono">{symbolFilter.trim()}</span>
+              {t.explorer.noMatchSuffix}
             </p>
             <button
               type="button"
@@ -310,7 +310,7 @@ export function SymbolExplorer({
               }}
               className="px-2.5 py-1 rounded border border-slate-700 bg-slate-900 hover:bg-slate-800 text-[11px] text-slate-300 cursor-pointer"
             >
-              清除搜尋
+              {t.explorer.clearSearchBtn}
             </button>
           </div>
         ) : (
@@ -346,7 +346,7 @@ export function SymbolExplorer({
 
                 {file.isOversized && !isCollapsed && (
                   <div className="px-8 pb-1 text-[11px] text-amber-300/90">
-                    檔案較長 ({file.lineCount} 行 · 已自動分段)
+                    {t.explorer.oversized(file.lineCount)}
                   </div>
                 )}
 
@@ -415,7 +415,7 @@ export function SymbolExplorer({
                             <button
                               type="button"
                               onClick={() => onToggleFocal(plan.node.id)}
-                              title={plan.isFocal ? '取消主要修改目標' : '設為這次要改的重點'}
+                              title={plan.isFocal ? t.explorer.toggleFocalRemove : t.explorer.toggleFocalAdd}
                               className={`p-1 rounded transition-colors cursor-pointer ${
                                 plan.isFocal
                                   ? 'text-sky-400'
@@ -435,12 +435,12 @@ export function SymbolExplorer({
                               }
                               title={
                                 plan.autoExpanded
-                                  ? `系統判斷這個程式關聯較多，已自動展開完整內容（複雜度 ${plan.complexityScore ?? 0}）`
-                                  : `點一下可切換給 AI 看的程度（目前：${TIER_LABEL[plan.tier]}${plan.override !== 'auto' ? ' · 你手動指定' : ''}）`
+                                  ? t.explorer.tierTooltipAutoExpanded(plan.complexityScore ?? 0)
+                                  : t.explorer.tierTooltip(t.explorer.tierLabel[plan.tier], plan.override !== 'auto')
                               }
                               className={`text-[11px] font-medium px-1.5 py-0.5 rounded bg-slate-900/70 hover:bg-slate-800 transition-colors cursor-pointer whitespace-nowrap ${TIER_TEXT_CLASS[plan.tier]}`}
                             >
-                              {plan.autoExpanded ? '完整 · 自動補齊' : TIER_LABEL[plan.tier]}
+                              {plan.autoExpanded ? t.explorer.tierAutoExpanded : t.explorer.tierLabel[plan.tier]}
                             </button>
                           </div>
                         </div>
@@ -455,8 +455,10 @@ export function SymbolExplorer({
       </div>
 
       <div className="px-4 py-2.5 border-t border-slate-800/80 text-[11px] text-slate-400 leading-relaxed">
-        點右側標籤可自己決定給 AI 看多少：<span className="text-emerald-400">給完整</span> /{' '}
-        <span className="text-amber-300">只留外框</span> / <span className="text-slate-500">略過</span>
+        {t.explorer.footerPrefix}
+        <span className="text-emerald-400">{t.explorer.tierLabel.full}</span> /{' '}
+        <span className="text-amber-300">{t.explorer.tierLabel.skeleton}</span> /{' '}
+        <span className="text-slate-500">{t.explorer.tierLabel.excluded}</span>
       </div>
     </aside>
   );

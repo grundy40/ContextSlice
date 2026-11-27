@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Crosshair, Eye, EyeOff, FolderOpen, Map as MapIcon, Maximize2, Minimize2, Search, ZoomIn, ZoomOut } from 'lucide-react';
+import { useI18n } from '../i18n';
 import {
   ComputedNodePlan,
   DependencyEdge,
@@ -35,22 +36,6 @@ const TIER_STROKE: Record<NodeTier, string> = {
   excluded: '#334155',
 };
 
-const TIER_TEXT: Record<NodeTier, string> = {
-  full: '給完整內容',
-  skeleton: '只留標題外框',
-  map: '只留名字位置',
-  excluded: '暫不放入',
-};
-
-const ROLE_HEADER: Record<PositionedNode['role'], string> = {
-  'caller-2': '更上游（第2層誰用到它）',
-  'caller-1': '上游（誰用到它）',
-  focal: '這次要改的重點',
-  'callee-1': '下游（它用到誰）',
-  'callee-2': '更下游（第2層用到誰）',
-  external: '其他沒連到的程式',
-};
-
 export function DependencyGraphView({
   nodePlans,
   edges,
@@ -62,6 +47,7 @@ export function DependencyGraphView({
   onSetOverride,
   onInspectDiff,
 }: DependencyGraphViewProps) {
+  const { locale, t } = useI18n();
   const [pan, setPan] = useState({ x: 36, y: 44 });
   const [zoom, setZoom] = useState(1);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
@@ -466,8 +452,8 @@ export function DependencyGraphView({
           >
             {onlyConnected ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
             {onlyConnected
-              ? `只看有關聯的（已藏起 ${layout.hiddenCount} 個無關程式）`
-              : `顯示全部 ${nodePlans.length} 個程式`}
+              ? t.graph.onlyConnected(layout.hiddenCount)
+              : t.graph.showAll(nodePlans.length)}
           </button>
 
           {/* Quick Jump to Endpoint / Function */}
@@ -492,7 +478,7 @@ export function DependencyGraphView({
                     centerOnNode(targetId);
                   }
                 }}
-                placeholder="快速跳到某個函式..."
+                placeholder={t.graph.jumpPlaceholder}
                 className="h-8 w-48 pl-8 pr-2.5 bg-[#0B0F17] border border-slate-700/80 rounded text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-400"
               />
             </div>
@@ -527,7 +513,7 @@ export function DependencyGraphView({
           <button
             type="button"
             onClick={() => zoomAroundViewportCenter(-0.15)}
-            aria-label="縮小"
+            aria-label={t.graph.zoomOutAria}
             className="p-1.5 rounded border border-slate-800 bg-[#111827] hover:bg-slate-800 text-slate-300 cursor-pointer"
           >
             <ZoomOut className="w-3.5 h-3.5" />
@@ -538,7 +524,7 @@ export function DependencyGraphView({
           <button
             type="button"
             onClick={() => zoomAroundViewportCenter(0.15)}
-            aria-label="放大"
+            aria-label={t.graph.zoomInAria}
             className="p-1.5 rounded border border-slate-800 bg-[#111827] hover:bg-slate-800 text-slate-300 cursor-pointer"
           >
             <ZoomIn className="w-3.5 h-3.5" />
@@ -549,7 +535,7 @@ export function DependencyGraphView({
             className="ml-1 px-2.5 py-1.5 text-xs border border-slate-800 bg-[#111827] hover:bg-slate-800 text-slate-300 rounded flex items-center gap-1 cursor-pointer whitespace-nowrap"
           >
             <Maximize2 className="w-3 h-3" />
-            自動置中
+            {t.graph.autoFit}
           </button>
         </div>
       </div>
@@ -559,11 +545,21 @@ export function DependencyGraphView({
         {layout.positioned.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center gap-3 px-6 text-center">
             <p className="text-sm font-medium text-slate-200">
-              尚未載入任何專案程式碼
+              {t.graph.emptyTitle}
             </p>
             <p className="text-xs text-slate-400 max-w-md leading-relaxed">
-              請點擊右上角「匯入資料夾 / 檔案」按鈕，選取本機資料夾、多個檔案或直接貼上程式碼，系統就會在瀏覽器端自動解析函式結構與依賴關係。
+              {t.graph.emptyDesc}
             </p>
+            {onOpenImport && (
+              <button
+                type="button"
+                onClick={onOpenImport}
+                className="mt-1 px-4 py-2 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-md flex items-center gap-1.5 cursor-pointer"
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                {t.header.importBtn}
+              </button>
+            )}
           </div>
         ) : (
           <svg
@@ -620,7 +616,7 @@ export function DependencyGraphView({
                   fontWeight={600}
                   fontFamily="DM Sans, sans-serif"
                 >
-                  {`${ROLE_HEADER[col.role]} (${col.count})`}
+                  {`${t.graph.roleHeader[col.role]} (${col.count})`}
                 </text>
               ))}
 
@@ -711,33 +707,33 @@ export function DependencyGraphView({
                 const statusBadges: Array<{ text: string; bg: string; fg: string; stroke: string; w: number }> = [];
                 if (isAutoExpanded) {
                   statusBadges.push({
-                    text: '已擴充',
+                    text: t.graph.badgeAutoExpanded,
                     bg: '#064E3B',
                     fg: '#6EE7B7',
                     stroke: '#10B981',
-                    w: 44,
+                    w: locale === 'en' ? 56 : 44,
                   });
                 } else if (isManualOverride) {
                   statusBadges.push({
-                    text: '手動',
+                    text: t.graph.badgeManual,
                     bg: '#2E1065',
                     fg: '#DDD6FE',
                     stroke: '#8B5CF6',
-                    w: 34,
+                    w: locale === 'en' ? 48 : 34,
                   });
                 }
                 if (isHighComplexity) {
                   statusBadges.push({
-                    text: '高複雜',
+                    text: t.graph.badgeHighComplexity,
                     bg: '#431407',
                     fg: '#FDBA74',
                     stroke: '#F97316',
-                    w: 44,
+                    w: locale === 'en' ? 54 : 44,
                   });
                 }
 
                 const badgesTotalW = statusBadges.reduce((acc, b, idx) => acc + b.w + (idx > 0 ? 4 : 0), 0);
-                const maxNameChars = badgesTotalW > 0 ? (badgesTotalW > 55 ? 14 : 17) : 24;
+                const maxNameChars = badgesTotalW > 0 ? (badgesTotalW > 75 ? 12 : badgesTotalW > 48 ? 15 : 17) : 24;
                 const displayName =
                   plan.node.name.length > maxNameChars
                     ? plan.node.name.slice(0, maxNameChars - 1) + '…'
@@ -758,7 +754,7 @@ export function DependencyGraphView({
                     style={{ opacity, transition: 'opacity 150ms ease' }}
                   >
                     <title>
-                      {`${plan.node.name} (${plan.node.filePath}:${plan.node.startLine}-${plan.node.endLine})\n層級：${TIER_TEXT[plan.tier]}${isAutoExpanded ? ' · 系統已自動擴充' : ''}${isManualOverride ? ' · 手動 Override' : ''}${isHighComplexity ? ` · 高複雜度 (${complexity})` : ''}\nToken：${plan.injectedTokens}/${plan.node.rawTokens}`}
+                      {`${plan.node.name} (${plan.node.filePath}:${plan.node.startLine}-${plan.node.endLine})\n${t.graph.tooltipLayer}${t.graph.tierText[plan.tier]}${isAutoExpanded ? t.graph.tooltipAutoExpanded : ''}${isManualOverride ? t.graph.tooltipManual : ''}${isHighComplexity ? t.graph.tooltipHighComplexity(complexity) : ''}\nToken: ${plan.injectedTokens}/${plan.node.rawTokens}`}
                     </title>
 
                     {/* Outer halo for auto-expanded or high-complexity nodes when selected */}
@@ -853,19 +849,7 @@ export function DependencyGraphView({
                       fontWeight={500}
                       fontFamily="DM Sans, sans-serif"
                     >
-                      {`${
-                        role === 'caller-1'
-                          ? '誰用到它'
-                          : role === 'caller-2'
-                            ? '間接上游'
-                            : role === 'focal'
-                              ? '修改重點'
-                              : role === 'callee-1'
-                                ? '它用到誰'
-                                : role === 'callee-2'
-                                  ? '間接下游'
-                                  : '無關聯'
-                      } · ${isAutoExpanded ? '已自動補齊' : TIER_TEXT[plan.tier]}`}
+                      {`${t.graph.roleShort[role]} · ${isAutoExpanded ? t.graph.autoCompleted : t.graph.tierText[plan.tier]}`}
                     </text>
 
                     <text
@@ -890,23 +874,23 @@ export function DependencyGraphView({
           <div className="absolute bottom-3 left-3 z-20 rounded-md border border-slate-700/80 bg-[#0E1420]/95 px-3 py-2 shadow-xl backdrop-blur-sm flex flex-wrap items-center gap-x-3.5 gap-y-1.5 text-[11px] text-slate-300">
             <span className="inline-flex items-center gap-1.5">
               <span className="w-3 h-2.5 rounded-[2px] border-[1.5px] border-sky-400 bg-sky-500/15" />
-              修改重點 / 選取
+              {t.graph.legendFocal}
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="w-3 h-2.5 rounded-[2px] border-[1.5px] border-emerald-400 bg-emerald-500/15" />
-              已擴充 ({statusSummary.autoExpandedCount})
+              {t.graph.legendExpanded(statusSummary.autoExpandedCount)}
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="w-3 h-2.5 rounded-[2px] border-[1.5px] border-dashed border-violet-400 bg-violet-500/15" />
-              手動 Override ({statusSummary.manualOverrideCount})
+              {t.graph.legendManual(statusSummary.manualOverrideCount)}
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="w-3 h-2.5 rounded-[2px] border-[1.5px] border-orange-500 bg-orange-500/15" />
-              高複雜度 ({statusSummary.highComplexityCount})
+              {t.graph.legendComplexity(statusSummary.highComplexityCount)}
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="w-3 h-2.5 rounded-[2px] border-[1.5px] border-amber-400 bg-amber-400/10" />
-              僅留外框
+              {t.graph.legendSkeleton}
             </span>
           </div>
         )}
@@ -917,11 +901,11 @@ export function DependencyGraphView({
             {minimapOpen ? (
               <div className="flex flex-col">
                 <div className="px-2.5 py-1 border-b border-slate-800/90 flex items-center justify-between gap-2 text-[10.5px] text-slate-400">
-                  <span className="font-medium text-slate-300">全景小地圖</span>
+                  <span className="font-medium text-slate-300">{t.graph.minimapTitle}</span>
                   <button
                     type="button"
                     onClick={() => setMinimapOpen(false)}
-                    aria-label="收合小地圖"
+                    aria-label={t.graph.minimapCloseAria}
                     className="p-0.5 text-slate-400 hover:text-slate-100 cursor-pointer"
                   >
                     <Minimize2 className="w-3 h-3" />
@@ -1011,7 +995,7 @@ export function DependencyGraphView({
                 className="px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:text-white flex items-center gap-1.5 cursor-pointer"
               >
                 <MapIcon className="w-3.5 h-3.5 text-sky-400" />
-                小地圖
+                {t.graph.minimapOpen}
               </button>
             )}
           </div>
@@ -1028,17 +1012,17 @@ export function DependencyGraphView({
               </span>
               {selectedPlan.autoExpanded && (
                 <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-[10.5px] font-medium text-emerald-300">
-                  已擴充節點
+                  {t.graph.inspectorAutoExpanded}
                 </span>
               )}
               {selectedPlan.override !== 'auto' && (
                 <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-500/40 text-[10.5px] font-medium text-violet-300">
-                  手動 Override
+                  {t.graph.inspectorManual}
                 </span>
               )}
               {(selectedPlan.complexityScore ?? 0) >= 46 && (
                 <span className="px-1.5 py-0.5 rounded bg-orange-500/15 border border-orange-500/40 text-[10.5px] font-medium text-orange-300">
-                  高複雜度 ({selectedPlan.complexityScore})
+                  {t.graph.inspectorComplexity(selectedPlan.complexityScore ?? 0)}
                 </span>
               )}
               <span className="text-slate-500">·</span>
@@ -1061,7 +1045,7 @@ export function DependencyGraphView({
               }`}
             >
               <Crosshair className="w-3.5 h-3.5" />
-              {selectedPlan.isFocal ? '取消修改重點' : '設為修改重點'}
+              {selectedPlan.isFocal ? t.graph.removeFocal : t.graph.setFocal}
             </button>
 
             <div className="flex items-center p-0.5 bg-[#0B0F17] border border-slate-800 rounded">
@@ -1076,13 +1060,7 @@ export function DependencyGraphView({
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  {mode === 'auto'
-                    ? '自動'
-                    : mode === 'full'
-                      ? '給完整'
-                      : mode === 'skeleton'
-                        ? '只留外框'
-                        : '略過'}
+                  {t.graph.overrideMode[mode]}
                 </button>
               ))}
             </div>
@@ -1092,7 +1070,7 @@ export function DependencyGraphView({
               onClick={() => onInspectDiff(selectedPlan.node.id)}
               className="px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-100 rounded transition-colors cursor-pointer whitespace-nowrap"
             >
-              看精簡前後對比
+              {t.graph.inspectDiff}
             </button>
           </div>
         </div>

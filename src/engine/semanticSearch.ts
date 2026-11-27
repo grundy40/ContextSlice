@@ -1,3 +1,4 @@
+import { getMessages, Locale } from '../i18n';
 import { AstSymbolNode, ComputedNodePlan, DependencyEdge } from '../types/context';
 
 export interface SemanticMatchInfo {
@@ -173,6 +174,7 @@ function extractQueryIntent(rawQuery: string): {
 function scoreSingleNode(
   node: AstSymbolNode,
   intent: ReturnType<typeof extractQueryIntent>,
+  eng: ReturnType<typeof getMessages>['engine'],
 ): SemanticMatchInfo | null {
   const { rawLower, asciiTerms, cjkPhrases, expandedTerms } = intent;
   const nameLower = node.name.toLowerCase();
@@ -192,15 +194,15 @@ function scoreSingleNode(
   if (nameLower === rawLower) {
     score += 100;
     kind = 'name';
-    reasonLabel = '名稱完全符合';
+    reasonLabel = eng.semanticExactName;
   } else if (nameLower.includes(rawLower) || qualifiedLower.includes(rawLower)) {
     score += 75;
     kind = 'name';
-    reasonLabel = '名稱直接符合';
+    reasonLabel = eng.semanticDirectName;
   } else if (pathLower.includes(rawLower)) {
     score += 48;
     kind = 'name';
-    reasonLabel = '檔名路徑符合';
+    reasonLabel = eng.semanticPathMatch;
   }
 
   // 2. Referenced variable / identifier match
@@ -209,7 +211,7 @@ function scoreSingleNode(
     score += 55;
     if (kind !== 'name') {
       kind = 'variable';
-      reasonLabel = `含變數 ${exactVar}`;
+      reasonLabel = eng.semanticVar(exactVar);
       matchedTerm = exactVar;
     }
   }
@@ -220,14 +222,14 @@ function scoreSingleNode(
       score += 46;
       if (!reasonLabel) {
         kind = 'behavior';
-        reasonLabel = `註解語義命中「${phrase}」`;
+        reasonLabel = eng.semanticDocPhrase(phrase);
         matchedTerm = phrase;
       }
     } else if (bodyLower.includes(phrase)) {
       score += 34;
       if (!reasonLabel) {
         kind = 'behavior';
-        reasonLabel = `程式內文語義「${phrase}」`;
+        reasonLabel = eng.semanticBodyPhrase(phrase);
         matchedTerm = phrase;
       }
     }
@@ -247,7 +249,7 @@ function scoreSingleNode(
       behaviorHits += 1;
       if (!reasonLabel) {
         kind = 'behavior';
-        reasonLabel = `行為語義命中 ${term}`;
+        reasonLabel = eng.semanticBehaviorName(term);
         matchedTerm = term;
       }
     } else if (inVars) {
@@ -255,7 +257,7 @@ function scoreSingleNode(
       behaviorHits += 1;
       if (!reasonLabel) {
         kind = 'behavior';
-        reasonLabel = `關聯變數語義 ${term}`;
+        reasonLabel = eng.semanticBehaviorVar(term);
         matchedTerm = term;
       }
     } else if (inComments) {
@@ -263,7 +265,7 @@ function scoreSingleNode(
       behaviorHits += 1;
       if (!reasonLabel) {
         kind = 'behavior';
-        reasonLabel = `註解語義命中 ${term}`;
+        reasonLabel = eng.semanticBehaviorDoc(term);
         matchedTerm = term;
       }
     } else if (inBody) {
@@ -271,7 +273,7 @@ function scoreSingleNode(
       behaviorHits += 1;
       if (!reasonLabel) {
         kind = 'behavior';
-        reasonLabel = `實作行為命中 ${term}`;
+        reasonLabel = eng.semanticBehaviorBody(term);
         matchedTerm = term;
       }
     }
@@ -286,14 +288,14 @@ function scoreSingleNode(
     if (nameSim >= 0.56) {
       score += Math.round(nameSim * 44);
       kind = 'fuzzy';
-      reasonLabel = '拼寫模糊相近';
+      reasonLabel = eng.semanticFuzzyName;
     } else {
       for (const id of node.referencedIdentifiers) {
         const varSim = fuzzySubsequenceScore(id, rawLower);
         if (varSim >= 0.65) {
           score += Math.round(varSim * 32);
           kind = 'fuzzy';
-          reasonLabel = `模糊相近變數 ${id}`;
+          reasonLabel = eng.semanticFuzzyVar(id);
           matchedTerm = id;
           break;
         }
@@ -321,7 +323,9 @@ export function searchAstSymbolsSemantic(
   edges: DependencyEdge[],
   rawQuery: string,
   semanticEnabled: boolean,
+  locale: Locale = 'zh-TW',
 ): Map<string, SemanticMatchInfo> {
+  const { engine: eng } = getMessages(locale);
   const results = new Map<string, SemanticMatchInfo>();
   const trimmed = rawQuery.trim();
   if (!trimmed) return results;
@@ -339,7 +343,7 @@ export function searchAstSymbolsSemantic(
           nodeId: p.node.id,
           score: 80,
           kind: 'name',
-          reasonLabel: '名稱符合',
+          reasonLabel: eng.semanticNameMatch,
         });
         continue;
       }
@@ -349,7 +353,7 @@ export function searchAstSymbolsSemantic(
           nodeId: p.node.id,
           score: 50,
           kind: 'variable',
-          reasonLabel: `含變數 ${refVar}`,
+          reasonLabel: eng.semanticVar(refVar),
           matchedTerm: refVar,
         });
       }
@@ -361,7 +365,7 @@ export function searchAstSymbolsSemantic(
   const directMatches = new Map<string, SemanticMatchInfo>();
 
   for (const p of nodePlans) {
-    const match = scoreSingleNode(p.node, intent);
+    const match = scoreSingleNode(p.node, intent, eng);
     if (match) {
       directMatches.set(p.node.id, match);
       results.set(p.node.id, match);
@@ -378,12 +382,12 @@ export function searchAstSymbolsSemantic(
     if (srcMatch && srcMatch.score >= 24 && !results.has(edge.targetNodeId)) {
       const propagatedScore = Math.round(srcMatch.score * 0.48);
       if (propagatedScore >= 14) {
-        const srcName = nodeNameById.get(edge.sourceNodeId) ?? '關聯函式';
+        const srcName = nodeNameById.get(edge.sourceNodeId) ?? eng.semanticStructFallbackName;
         results.set(edge.targetNodeId, {
           nodeId: edge.targetNodeId,
           score: propagatedScore,
           kind: 'structure',
-          reasonLabel: `結構關聯 · 被 ${srcName} 呼叫`,
+          reasonLabel: eng.semanticStructCalledBy(srcName),
           matchedTerm: srcName,
         });
       }
@@ -392,12 +396,12 @@ export function searchAstSymbolsSemantic(
     if (dstMatch && dstMatch.score >= 24 && !results.has(edge.sourceNodeId)) {
       const propagatedScore = Math.round(dstMatch.score * 0.45);
       if (propagatedScore >= 14) {
-        const dstName = nodeNameById.get(edge.targetNodeId) ?? '關聯函式';
+        const dstName = nodeNameById.get(edge.targetNodeId) ?? eng.semanticStructFallbackName;
         results.set(edge.sourceNodeId, {
           nodeId: edge.sourceNodeId,
           score: propagatedScore,
           kind: 'structure',
-          reasonLabel: `結構關聯 · 呼叫 ${dstName}`,
+          reasonLabel: eng.semanticStructCalls(dstName),
           matchedTerm: dstName,
         });
       }

@@ -5,6 +5,7 @@ import {
   readFilesFromDirectoryHandle,
   readFilesFromFileList,
 } from '../engine/localImporter';
+import { useI18n } from '../i18n';
 import { ImportReport } from '../types/context';
 
 interface ImportPayload {
@@ -20,6 +21,7 @@ interface ImportModalProps {
 }
 
 export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) {
+  const { t } = useI18n();
   const [tab, setTab] = useState<'files' | 'paste'>('files');
   const [pastePath, setPastePath] = useState('src/services/OversizedHandler.ts');
   const [pasteContent, setPasteContent] = useState('');
@@ -32,16 +34,17 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
 
   if (!open) return null;
 
-  const processFileList = async (list: FileList | null, sourceLabel = '電腦選取檔案') => {
+  const processFileList = async (
+    list: FileList | null,
+    sourceLabel = t.importModal.defaultSourceFiles,
+  ) => {
     if (!list || list.length === 0) return;
     setErrorMsg(null);
     setIsReading(true);
     try {
       const { files, report } = await readFilesFromFileList(list, sourceLabel);
       if (files.length === 0) {
-        setErrorMsg(
-          '沒有找到可分析的程式碼檔案（任何文字型程式碼檔皆可匯入；圖片、壓縮檔、執行檔等二進位檔會自動略過）',
-        );
+        setErrorMsg(t.importModal.errNoCode);
         return;
       }
       onImportFiles({ files, report, directoryHandle: null });
@@ -63,7 +66,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
         setIsReading(true);
         const { files, report } = await readFilesFromDirectoryHandle(dirHandle);
         if (files.length === 0) {
-          setErrorMsg('這個資料夾內沒有找到支援的程式碼檔案');
+          setErrorMsg(t.importModal.errFolderEmpty);
           setIsReading(false);
           return;
         }
@@ -85,7 +88,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
   const handlePasteSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!pasteContent.trim()) {
-      setErrorMsg('請先貼上程式碼內容');
+      setErrorMsg(t.importModal.errNoPaste);
       return;
     }
     const cleanPath = pastePath.trim() || 'src/OversizedFile.ts';
@@ -115,12 +118,12 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
       <div className="w-full max-w-xl rounded-lg border border-slate-700/80 bg-[#111827] shadow-2xl overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
           <h2 id="import-modal-title" className="text-sm font-semibold text-slate-100">
-            匯入你的專案資料夾或程式檔案
+            {t.importModal.title}
           </h2>
           <button
             type="button"
             onClick={onClose}
-            aria-label="關閉"
+            aria-label={t.importModal.closeAria}
             className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-slate-800 cursor-pointer"
           >
             <X className="w-4 h-4" />
@@ -139,7 +142,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                 tab === 'files' ? 'bg-slate-800 text-sky-300' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              選取電腦資料夾 / 多個檔案
+              {t.importModal.tabFiles}
             </button>
             <button
               type="button"
@@ -151,7 +154,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                 tab === 'paste' ? 'bg-slate-800 text-sky-300' : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              直接貼上一段長程式碼
+              {t.importModal.tabPaste}
             </button>
           </div>
         </div>
@@ -168,7 +171,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                 onDrop={(e) => {
                   e.preventDefault();
                   setIsDragging(false);
-                  void processFileList(e.dataTransfer.files, '拖曳匯入檔案');
+                  void processFileList(e.dataTransfer.files, t.importModal.defaultSourceDrag);
                 }}
                 className={`border border-dashed rounded-lg p-8 text-center transition-colors ${
                   isDragging
@@ -177,13 +180,13 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                 }`}
               >
                 <p className="text-sm font-medium text-slate-200">
-                  把資料夾或程式檔案拖進來，或點下面按鈕選擇
+                  {t.importModal.dropTitle}
                 </p>
                 <p className="mt-1.5 text-xs text-slate-400">
-                  支援 TS/JS、Python、Go、C/C++、Swift、PHP、HTML/CSS、Rust、Java、C#、Ruby 等語言；所有分析都在瀏覽器本機完成，不會上傳到外部伺服器。
+                  {t.importModal.dropDesc}
                 </p>
                 <p className="mt-1 text-[11px] text-slate-500">
-                  瀏覽器單次最多載入 200 個檔案（自動略過 node_modules、.git、dist 等編譯目錄、二進位檔與超過 1.5MB 檔案）
+                  {t.importModal.dropLimit}
                 </p>
 
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
@@ -194,7 +197,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                     className="px-4 py-2 text-xs font-semibold bg-sky-500 hover:bg-sky-400 disabled:opacity-60 text-slate-950 rounded flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                   >
                     <FolderOpen className="w-3.5 h-3.5" />
-                    {isReading ? '讀取中...' : '選擇整個資料夾'}
+                    {isReading ? t.importModal.reading : t.importModal.pickFolder}
                   </button>
                   <button
                     type="button"
@@ -203,7 +206,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                     className="px-4 py-2 text-xs font-medium bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-slate-100 rounded flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                   >
                     <FilePlus2 className="w-3.5 h-3.5" />
-                    選擇多個檔案
+                    {t.importModal.pickFiles}
                   </button>
                 </div>
 
@@ -213,7 +216,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                   multiple
                   className="hidden"
                   onChange={(e) => {
-                    void processFileList(e.target.files, '電腦選取多檔');
+                    void processFileList(e.target.files, t.importModal.defaultSourceMulti);
                     e.target.value = '';
                   }}
                 />
@@ -228,7 +231,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                   onChange={(e) => {
                     const firstRel = (e.target.files?.[0] as (File & { webkitRelativePath?: string }) | undefined)
                       ?.webkitRelativePath;
-                    const folderName = firstRel ? firstRel.split('/')[0] : '本機資料夾';
+                    const folderName = firstRel ? firstRel.split('/')[0] : t.importModal.defaultFolderName;
                     void processFileList(e.target.files, folderName);
                     e.target.value = '';
                   }}
@@ -239,7 +242,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
             <form onSubmit={handlePasteSubmit} className="space-y-3">
               <div>
                 <label htmlFor="paste-filename" className="block text-xs font-medium text-slate-300 mb-1">
-                  檔名與副檔名（用來判斷這是哪一種程式語言）
+                  {t.importModal.pasteFilenameLabel}
                 </label>
                 <input
                   id="paste-filename"
@@ -252,7 +255,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
 
               <div>
                 <label htmlFor="paste-code" className="block text-xs font-medium text-slate-300 mb-1">
-                  把太長、貼不進對話框的程式碼貼在這裡（會自動幫你拆解分段）
+                  {t.importModal.pasteCodeLabel}
                 </label>
                 <textarea
                   id="paste-code"
@@ -270,13 +273,13 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                   onClick={onClose}
                   className="px-4 py-2 text-xs text-slate-300 hover:text-white rounded cursor-pointer"
                 >
-                  取消
+                  {t.importModal.cancel}
                 </button>
                 <button
                   type="submit"
                   className="px-4 py-2 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded cursor-pointer"
                 >
-                  開始分析與精簡
+                  {t.importModal.submit}
                 </button>
               </div>
             </form>

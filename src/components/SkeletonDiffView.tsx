@@ -1,3 +1,4 @@
+import { useI18n } from '../i18n';
 import { ComputedNodePlan } from '../types/context';
 
 interface SkeletonDiffViewProps {
@@ -11,6 +12,7 @@ export function SkeletonDiffView({
   selectedNodeId,
   onSelectNode,
 }: SkeletonDiffViewProps) {
+  const { t } = useI18n();
   const activePlan =
     nodePlans.find((p) => p.node.id === selectedNodeId) ??
     nodePlans.find((p) => p.tier === 'skeleton') ??
@@ -19,7 +21,7 @@ export function SkeletonDiffView({
   if (!activePlan) {
     return (
       <div className="flex-1 flex items-center justify-center bg-[#0B0F17] text-sm text-slate-400">
-        目前沒有可以對照的程式碼
+        {t.diff.empty}
       </div>
     );
   }
@@ -36,7 +38,7 @@ export function SkeletonDiffView({
       <div className="px-5 py-3 border-b border-slate-800/80 bg-[#0E1420] flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <label htmlFor="diff-symbol-select" className="text-xs text-slate-400 whitespace-nowrap">
-            選擇要看的函式
+            {t.diff.selectLabel}
           </label>
           <select
             id="diff-symbol-select"
@@ -54,14 +56,14 @@ export function SkeletonDiffView({
 
         <div className="flex items-center gap-3 text-xs font-mono tabular-nums">
           <span className="text-slate-400">
-            原本 {node.rawTokens} tk
+            {t.diff.originalTk(node.rawTokens)}
           </span>
           <span className="text-slate-600">→</span>
           <span className="text-amber-300">
-            精簡後 {node.skeletonTokens} tk
+            {t.diff.slicedTk(node.skeletonTokens)}
           </span>
           <span className="text-slate-600">·</span>
-          <span className="text-emerald-400 font-semibold">省下 {savedPct}%</span>
+          <span className="text-emerald-400 font-semibold">{t.diff.savedPct(savedPct)}</span>
         </div>
       </div>
 
@@ -69,9 +71,9 @@ export function SkeletonDiffView({
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 min-h-0 divide-y lg:divide-y-0 lg:divide-x divide-slate-800/80">
         <div className="flex flex-col min-h-0">
           <div className="px-4 py-2 border-b border-slate-800/80 bg-[#111827] flex items-center justify-between text-xs">
-            <span className="font-medium text-slate-200">原本完整程式碼（要修改它時才給完整）</span>
+            <span className="font-medium text-slate-200">{t.diff.fullCodeHeader}</span>
             <span className="font-mono tabular-nums text-slate-400">
-              {node.lineCount} 行 · {node.rawTokens} tokens
+              {t.diff.linesAndTokens(node.lineCount, node.rawTokens)}
             </span>
           </div>
           <pre className="flex-1 p-4 overflow-auto text-[12px] leading-relaxed font-mono text-slate-300 bg-[#0B0F17]">
@@ -81,9 +83,9 @@ export function SkeletonDiffView({
 
         <div className="flex flex-col min-h-0">
           <div className="px-4 py-2 border-b border-slate-800/80 bg-[#111827] flex items-center justify-between text-xs">
-            <span className="font-medium text-amber-300">精簡外框版（只留名稱、參數與格式）</span>
+            <span className="font-medium text-amber-300">{t.diff.skeletonHeader}</span>
             <span className="font-mono tabular-nums text-slate-400">
-              折疊實作細節 · {node.skeletonTokens} tokens
+              {t.diff.foldedDetails(node.skeletonTokens)}
             </span>
           </div>
           <pre className="flex-1 p-4 overflow-auto text-[12px] leading-relaxed font-mono text-amber-100/90 bg-[#0B0F17]">

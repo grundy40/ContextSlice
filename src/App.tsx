@@ -7,6 +7,7 @@ import {
   readFilesFromDirectoryHandle,
 } from './engine/localImporter';
 import { invokeSkeletonExpansionMcpTool } from './engine/skeletonExpansion';
+import { I18nProvider, useI18n } from './i18n';
 import { DependencyGraphView } from './components/DependencyGraphView';
 import { HeaderBar } from './components/HeaderBar';
 import { ImportModal } from './components/ImportModal';
@@ -67,6 +68,15 @@ function loadSavedHistory(): { items: SessionTokenSnapshot[]; maxSeq: number } {
 }
 
 export default function App() {
+  return (
+    <I18nProvider>
+      <AppContent />
+    </I18nProvider>
+  );
+}
+
+function AppContent() {
+  const { locale, t } = useI18n();
   const savedPrefs = useMemo(() => loadSavedPreferences(), []);
   const savedHistory = useMemo(() => loadSavedHistory(), []);
 
@@ -147,8 +157,8 @@ export default function App() {
   }, [sessionHistory]);
 
   const activeProjectLabel = useMemo(() => {
-    return importReport?.sourceLabel || '尚未匯入專案';
-  }, [importReport]);
+    return importReport?.sourceLabel || t.app.noProject;
+  }, [importReport, t.app.noProject]);
 
   const projectTagKey = useMemo(() => {
     return `project:${importReport?.sourceLabel || 'default'}`;
@@ -178,8 +188,9 @@ export default function App() {
 
   const contextKey = useMemo(
     () =>
-      `custom|r${workspaceRevision}|${workspace.files.length}:${workspace.nodes.length}|${query}|${budgetTokens}|${maxHops}|${pinnedFocalIds.join(',')}|${JSON.stringify(overrides)}`,
+      `custom|${locale}|r${workspaceRevision}|${workspace.files.length}:${workspace.nodes.length}|${query}|${budgetTokens}|${maxHops}|${pinnedFocalIds.join(',')}|${JSON.stringify(overrides)}`,
     [
+      locale,
       workspaceRevision,
       workspace.files.length,
       workspace.nodes.length,
@@ -216,6 +227,7 @@ export default function App() {
         autoExpandClusters: proactiveDiscovery,
         proactiveExpandedIds: activeProactiveExpandedIds,
         proactiveToolCall: activeProactiveToolCall,
+        locale,
       }),
     [
       workspace,
@@ -227,6 +239,7 @@ export default function App() {
       proactiveDiscovery,
       activeProactiveExpandedIds,
       activeProactiveToolCall,
+      locale,
     ],
   );
 
@@ -252,6 +265,7 @@ export default function App() {
       remainingBudget: assembly.remainingBudgetForExpansion,
       autoExpandEnabled: true,
       triggerMode: 'proactive-discovery',
+      locale,
     });
 
     setProactiveState((prev) => ({
@@ -267,6 +281,7 @@ export default function App() {
     contextKey,
     assembly.detectedClusters,
     assembly.remainingBudgetForExpansion,
+    locale,
   ]);
 
   // Record up to the last 10 settled session states for the token consumption trend chart
@@ -305,7 +320,7 @@ export default function App() {
       const nextSnap: SessionTokenSnapshot = {
         id: stateId,
         stepLabel: `#${snapshotSeqRef.current}`,
-        timestamp: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
+        timestamp: new Date().toLocaleTimeString(t.app.timeLocale, { hour12: false }),
         injectedTokens: assembly.totalInjectedTokens,
         budgetTokens: assembly.budgetTokens,
         utilizationPercent: assembly.budgetUtilizationPercent,
@@ -321,6 +336,7 @@ export default function App() {
     proactiveState.contextKey,
     contextKey,
     activeProjectLabel,
+    activeProjectTag?.label,
     maxHops,
     query,
     assembly.totalInjectedTokens,
@@ -328,6 +344,7 @@ export default function App() {
     assembly.budgetUtilizationPercent,
     assembly.metrics.rawRepoTokens,
     assembly.autoExpandedNodeIds.length,
+    t.app.timeLocale,
   ]);
 
   const effectiveSelectedNodeId = useMemo(() => {
@@ -545,17 +562,19 @@ export default function App() {
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
             )}
             <span className="truncate">
-              已從「{importReport.sourceLabel}」載入 <strong>{importReport.loadedCount}</strong> 個程式檔
-              {importReport.skippedUnsupported > 0 && ` · 略過 ${importReport.skippedUnsupported} 個二進位或非文字檔`}
-              {importReport.skippedOversized > 0 && ` · 略過 ${importReport.skippedOversized} 個超過 1.5MB 大檔`}
+              {t.app.importLoaded(importReport.sourceLabel, importReport.loadedCount)}
+              {importReport.skippedUnsupported > 0 &&
+                t.app.importSkippedUnsupported(importReport.skippedUnsupported)}
+              {importReport.skippedOversized > 0 &&
+                t.app.importSkippedOversized(importReport.skippedOversized)}
               {importReport.truncatedByLimit > 0 &&
-                ` · 另有 ${importReport.truncatedByLimit} 個檔案超過瀏覽器 80 檔上限（大型專案建議改用右側「命令列腳本」或「1個工具自動切」完整掃描）`}
+                t.app.importTruncatedLimit(importReport.truncatedByLimit)}
             </span>
           </div>
           <button
             type="button"
             onClick={() => setImportReport(null)}
-            aria-label="關閉匯入提示"
+            aria-label={t.app.closeImportNoticeAria}
             className="p-1 rounded hover:bg-white/10 shrink-0 cursor-pointer"
           >
             <X className="w-3.5 h-3.5" />
@@ -575,10 +594,10 @@ export default function App() {
             >
               <span className="flex items-center gap-1.5">
                 <HelpCircle className="w-3.5 h-3.5 shrink-0" />
-                新手入門引導
+                {t.app.guideBtn}
               </span>
               <span className="text-[11px] text-sky-400/80">
-                {guideOpen ? '收起' : '30 秒看懂'}
+                {guideOpen ? t.app.guideCollapse : t.app.guideExpand}
               </span>
             </button>
           </div>
@@ -596,18 +615,18 @@ export default function App() {
           {guideOpen && (
             <div
               role="dialog"
-              aria-label="新手入門引導"
+              aria-label={t.app.guideAria}
               className="absolute left-3 top-12 z-40 w-[328px] rounded-xl border border-sky-500/40 bg-[#111827]/98 p-4 shadow-2xl backdrop-blur-md space-y-3"
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-100">
                   <Sparkles className="w-4 h-4 text-sky-400 shrink-0" />
-                  <span>第一次用？這工具很簡單！</span>
+                  <span>{t.app.guideTitle}</span>
                 </div>
                 <button
                   type="button"
                   onClick={() => setGuideOpen(false)}
-                  aria-label="關閉新手入門引導"
+                  aria-label={t.app.guideCloseAria}
                   className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-slate-800 cursor-pointer"
                 >
                   <X className="w-3.5 h-3.5" />
@@ -617,33 +636,33 @@ export default function App() {
               <div className="space-y-2.5 text-xs leading-relaxed text-slate-300">
                 <div className="rounded-lg border border-slate-800 bg-[#0B0F17] p-2.5">
                   <div className="font-semibold text-sky-300">
-                    1. 這裡可以看到你的程式結構
+                    {t.app.guideStep1Title}
                   </div>
                   <p className="mt-1 text-slate-400">
-                    左邊會幫你把檔案裡的函式列出來，中間圖表會畫出「誰呼叫誰」，不用自己一行一行慢慢翻。
+                    {t.app.guideStep1Desc}
                   </p>
                 </div>
 
                 <div className="rounded-lg border border-slate-800 bg-[#0B0F17] p-2.5">
                   <div className="font-semibold text-emerald-300">
-                    2. AI 會幫你自動挑選最相關的程式碼，節省 Token 費用
+                    {t.app.guideStep2Title}
                   </div>
                   <p className="mt-1 text-slate-400">
-                    系統只保留你要改的重點內容，其餘相關程式只留標題外框，右邊整理好後直接複製貼給 AI 就能用。
+                    {t.app.guideStep2Desc}
                   </p>
                 </div>
               </div>
 
               <div className="flex items-center justify-between pt-1">
                 <span className="text-[11px] text-slate-500">
-                  全部在瀏覽器本機處理，不上傳程式碼
+                  {t.app.guidePrivacy}
                 </span>
                 <button
                   type="button"
                   onClick={() => setGuideOpen(false)}
-                  className="px-3 py-1.5 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-md transition-colors cursor-pointer"
+                  className="px-3 py-1.5 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-md transition-colors cursor-pointer shrink-0"
                 >
-                  我知道了
+                  {t.app.guideAck}
                 </button>
               </div>
             </div>

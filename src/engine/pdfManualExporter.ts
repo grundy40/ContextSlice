@@ -1,5 +1,6 @@
 import { jsPDF } from 'jspdf';
-import { ContextAssemblyResult, DependencyEdge, NodeTier } from '../types/context';
+import { getMessages, Locale } from '../i18n';
+import { ContextAssemblyResult, DependencyEdge } from '../types/context';
 import { APP_VERSION } from '../version';
 
 export interface PdfManualExportInput {
@@ -8,6 +9,7 @@ export interface PdfManualExportInput {
   maxHops: 1 | 2;
   assembly: ContextAssemblyResult;
   edges: DependencyEdge[];
+  locale?: Locale;
 }
 
 const A4_W = 595.28;
@@ -23,13 +25,6 @@ const SANS_FONT =
   '"PingFang TC", "Microsoft JhengHei", "Noto Sans TC", "DM Sans", system-ui, sans-serif';
 const MONO_FONT =
   '"JetBrains Mono", "Consolas", "Courier New", monospace';
-
-const TIER_TEXT: Record<NodeTier, string> = {
-  full: '給完整內容',
-  skeleton: '只留外框',
-  map: '只留名稱',
-  excluded: '略過',
-};
 
 function wrapLines(
   ctx: CanvasRenderingContext2D,
@@ -81,9 +76,10 @@ function drawRoundedRect(
 }
 
 export async function exportContextManualPdf(input: PdfManualExportInput): Promise<void> {
-  const { projectLabel, query, maxHops, assembly, edges } = input;
+  const { projectLabel, query, maxHops, assembly, edges, locale = 'zh-TW' } = input;
+  const { pdf: txt } = getMessages(locale);
   const now = new Date();
-  const timestampStr = now.toLocaleString('zh-TW', { hour12: false });
+  const timestampStr = now.toLocaleString(txt.dateLocale, { hour12: false });
   const fileStamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
     now.getDate(),
   ).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(
@@ -97,7 +93,7 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
     canvas.width = Math.round(A4_W * SCALE);
     canvas.height = Math.round(A4_H * SCALE);
     const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('無法建立 PDF 畫布內容');
+    if (!ctx) throw new Error(txt.canvasError);
     ctx.scale(SCALE, SCALE);
 
     // Clean white technical sheet background
@@ -111,7 +107,7 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
     if (!isFirst) {
       ctx.font = `500 8.5px ${SANS_FONT}`;
       ctx.fillStyle = '#64748B';
-      ctx.fillText(`ContextSlice Studio ${APP_VERSION} · 技術摘要說明書`, MARGIN_X, 24);
+      ctx.fillText(txt.runningHeader(APP_VERSION), MARGIN_X, 24);
       ctx.textAlign = 'right';
       ctx.fillText(projectLabel, A4_W - MARGIN_X, 24);
       ctx.textAlign = 'left';
@@ -162,7 +158,7 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
   drawRoundedRect(ctx, MARGIN_X, y, CONTENT_W, 74, 8, '#F8FAFC', '#CBD5E1');
   ctx.font = `700 16px ${SANS_FONT}`;
   ctx.fillStyle = '#0F172A';
-  ctx.fillText('ContextSlice Studio 技術摘要說明書', MARGIN_X + 16, y + 25);
+  ctx.fillText(txt.titleBanner, MARGIN_X + 16, y + 25);
 
   ctx.font = `600 9px ${MONO_FONT}`;
   ctx.fillStyle = '#0284C7';
@@ -172,42 +168,42 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
 
   ctx.font = `400 9.5px ${SANS_FONT}`;
   ctx.fillStyle = '#334155';
-  const metaLine1 = `專案來源：${projectLabel}   |   關聯範圍：${maxHops} 層相關   |   產生時間：${timestampStr}`;
+  const metaLine1 = txt.metaLine1(projectLabel, maxHops, timestampStr);
   ctx.fillText(metaLine1.slice(0, 95), MARGIN_X + 16, y + 45);
 
   ctx.fillStyle = '#475569';
-  const taskText = `任務關鍵字：${query.trim() || '（未指定，依主要公開函式自動選取）'}`;
+  const taskText = txt.taskLabel(query.trim());
   ctx.fillText(taskText.slice(0, 88), MARGIN_X + 16, y + 61);
   y += 88;
 
   // === Section 1: Executive Metrics ===
-  drawSectionHeading('1', '上下文精簡與額度摘要');
+  drawSectionHeading('1', txt.sec1Title);
   const cardGap = 8;
   const cardW = (CONTENT_W - cardGap * 3) / 4;
   const cardH = 52;
   const cards = [
     {
-      label: '原本全部程式碼',
+      label: txt.cardRawLabel,
       value: `${assembly.metrics.rawRepoTokens.toLocaleString()} tk`,
-      note: `${assembly.nodePlans.length} 個函式區塊`,
+      note: txt.cardRawNote(assembly.nodePlans.length),
       accent: '#334155',
     },
     {
-      label: '精簡後送出量',
+      label: txt.cardSlicedLabel,
       value: `${assembly.totalInjectedTokens.toLocaleString()} tk`,
-      note: `上限 ${assembly.budgetTokens.toLocaleString()} (${assembly.budgetUtilizationPercent}%)`,
+      note: txt.cardSlicedNote(assembly.budgetTokens.toLocaleString(), assembly.budgetUtilizationPercent),
       accent: '#0284C7',
     },
     {
-      label: '總共省下比例',
+      label: txt.cardSavedLabel,
       value: `${assembly.metrics.netSavingsVsTraditionalPercent}%`,
-      note: `代碼縮小 ${assembly.metrics.codeReductionPercent}%`,
+      note: txt.cardSavedNote(assembly.metrics.codeReductionPercent),
       accent: '#059669',
     },
     {
-      label: '自動補齊重點',
-      value: `${assembly.autoExpandedNodeIds.length} 處`,
-      note: `偵測 ${assembly.detectedClusters.length} 個複雜處`,
+      label: txt.cardAutoLabel,
+      value: txt.cardAutoValue(assembly.autoExpandedNodeIds.length),
+      note: txt.cardAutoNote(assembly.detectedClusters.length),
       accent: '#D97706',
     },
   ];
@@ -233,15 +229,15 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
   const fullNodes = assembly.nodePlans.filter((p) => p.tier === 'full');
   drawSectionHeading(
     '2',
-    '已展開完整內容的節點（焦點與自動補齊）',
-    `共 ${fullNodes.length} 個完整保留節點，確保 AI 修改時擁有完整實作細節`,
+    txt.sec2Title,
+    txt.sec2Subtitle(fullNodes.length),
   );
 
   if (fullNodes.length === 0) {
     ensureSpace(24);
     ctx.font = `400 9.5px ${SANS_FONT}`;
     ctx.fillStyle = '#64748B';
-    ctx.fillText('目前沒有展開為完整內容的節點（可能因預算設定較低而壓縮為外框）。', MARGIN_X + 10, y + 12);
+    ctx.fillText(txt.sec2Empty, MARGIN_X + 10, y + 12);
     y += 22;
   } else {
     for (const plan of fullNodes.slice(0, 18)) {
@@ -251,23 +247,23 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
       drawRoundedRect(ctx, MARGIN_X, y, CONTENT_W, 30, 5, bg, border);
 
       const badge = plan.autoExpanded
-        ? '[自動補齊重點]'
+        ? txt.badgeAuto
         : plan.isFocal
-          ? '[主要修改目標]'
-          : '[手動給完整]';
+          ? txt.badgeFocal
+          : txt.badgeManual;
       ctx.font = `700 9px ${SANS_FONT}`;
       ctx.fillStyle = plan.autoExpanded ? '#047857' : '#0369A1';
       ctx.fillText(badge, MARGIN_X + 10, y + 12);
 
       ctx.font = `700 9.5px ${MONO_FONT}`;
       ctx.fillStyle = '#0F172A';
-      ctx.fillText(plan.node.name.slice(0, 36), MARGIN_X + 92, y + 12);
+      ctx.fillText(plan.node.name.slice(0, 36), MARGIN_X + 102, y + 12);
 
       ctx.font = `500 8.5px ${MONO_FONT}`;
       ctx.fillStyle = '#475569';
       ctx.textAlign = 'right';
       ctx.fillText(
-        `${plan.injectedTokens} tk · ${plan.node.lineCount} 行`,
+        `${plan.injectedTokens} tk · ${txt.lineUnit(plan.node.lineCount)}`,
         A4_W - MARGIN_X - 10,
         y + 12,
       );
@@ -287,8 +283,16 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
   const intraFileCount = edges.length - crossFileCount;
   drawSectionHeading(
     '3',
-    '程式依賴關聯分析結果',
-    `層級分布：完整 ${assembly.countsByTier.full} · 只留外框 ${assembly.countsByTier.skeleton} · 只留名稱 ${assembly.countsByTier.map} · 略過 ${assembly.countsByTier.excluded}  |  總關聯線 ${edges.length} 條（跨檔 ${crossFileCount} / 同檔 ${intraFileCount}）`,
+    txt.sec3Title,
+    txt.sec3Subtitle(
+      assembly.countsByTier.full,
+      assembly.countsByTier.skeleton,
+      assembly.countsByTier.map,
+      assembly.countsByTier.excluded,
+      edges.length,
+      crossFileCount,
+      intraFileCount,
+    ),
   );
 
   const nodeById = new Map(assembly.nodePlans.map((p) => [p.node.id, p]));
@@ -307,10 +311,14 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
       if (!src || !dst) continue;
 
       const kindLabel =
-        edge.kind === 'intra-file' ? '同檔引用' : edge.kind === 'import' ? '匯入參照' : '跨檔呼叫';
+        edge.kind === 'intra-file'
+          ? txt.edgeKindIntra
+          : edge.kind === 'import'
+            ? txt.edgeKindImport
+            : txt.edgeKindCross;
       ctx.font = `400 8.5px ${MONO_FONT}`;
       ctx.fillStyle = '#0F172A';
-      const line = `• ${src.node.name}  ──(${kindLabel})──▶  ${dst.node.name}   [${TIER_TEXT[dst.tier]}]`;
+      const line = `• ${src.node.name}  ──(${kindLabel})──▶  ${dst.node.name}   [${txt.tierText[dst.tier]}]`;
       ctx.fillText(line.slice(0, 95), MARGIN_X + 8, y + 11);
       y += 15;
     }
@@ -318,7 +326,7 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
     ensureSpace(20);
     ctx.font = `400 9px ${SANS_FONT}`;
     ctx.fillStyle = '#64748B';
-    ctx.fillText('目前載入的檔案之間沒有偵測到顯著的靜態呼叫邊。', MARGIN_X + 8, y + 11);
+    ctx.fillText(txt.sec3Empty, MARGIN_X + 8, y + 11);
     y += 18;
   }
 
@@ -329,11 +337,11 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
     drawRoundedRect(ctx, MARGIN_X, y, CONTENT_W, 18, 3, '#F1F5F9');
     ctx.font = `700 8.5px ${SANS_FONT}`;
     ctx.fillStyle = '#334155';
-    ctx.fillText('函式 / 區塊名稱', MARGIN_X + 8, y + 12);
-    ctx.fillText('所在檔案', MARGIN_X + 190, y + 12);
-    ctx.fillText('納入方式', MARGIN_X + 365, y + 12);
+    ctx.fillText(txt.tblName, MARGIN_X + 8, y + 12);
+    ctx.fillText(txt.tblFile, MARGIN_X + 190, y + 12);
+    ctx.fillText(txt.tblTier, MARGIN_X + 365, y + 12);
     ctx.textAlign = 'right';
-    ctx.fillText('送出 Token', A4_W - MARGIN_X - 8, y + 12);
+    ctx.fillText(txt.tblTokens, A4_W - MARGIN_X - 8, y + 12);
     ctx.textAlign = 'left';
     y += 20;
 
@@ -351,7 +359,7 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
       ctx.font = `500 8px ${SANS_FONT}`;
       ctx.fillStyle =
         plan.tier === 'full' ? '#047857' : plan.tier === 'skeleton' ? '#B45309' : '#475569';
-      ctx.fillText(plan.autoExpanded ? '自動補齊' : TIER_TEXT[plan.tier], MARGIN_X + 365, y + 10);
+      ctx.fillText(plan.autoExpanded ? txt.autoExpandedLabel : txt.tierText[plan.tier], MARGIN_X + 365, y + 10);
 
       ctx.font = `500 8.5px ${MONO_FONT}`;
       ctx.fillStyle = '#0F172A';
@@ -373,8 +381,8 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
   // === Section 4: Assembled Context Packet ===
   drawSectionHeading(
     '4',
-    '已組裝之上下文精簡內容（Context Slice）',
-    '以下為整理後可直接提供給 AI 模型或供離線審閱的結構化片段',
+    txt.sec4Title,
+    txt.sec4Subtitle,
   );
 
   ctx.font = `400 8px ${MONO_FONT}`;
@@ -408,7 +416,7 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
     lastCtx.font = `600 8.5px ${SANS_FONT}`;
     lastCtx.fillStyle = '#B45309';
     lastCtx.fillText(
-      `※ 內容篇幅超過 ${MAX_PDF_PAGES} 頁上限，其餘程式碼已省略；完整封包請於工作台「複製貼上」分頁取得。`,
+      txt.truncatedNotice(MAX_PDF_PAGES),
       MARGIN_X,
       Math.min(A4_H - MARGIN_BOTTOM - 4, y + 12),
     );
@@ -427,9 +435,9 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
 
     fCtx.font = `400 8px ${SANS_FONT}`;
     fCtx.fillStyle = '#64748B';
-    fCtx.fillText(`ContextSlice Studio ${APP_VERSION} · 本機運算生成，未上傳任何原始碼`, MARGIN_X, A4_H - 18);
+    fCtx.fillText(txt.footerPrivacy(APP_VERSION), MARGIN_X, A4_H - 18);
     fCtx.textAlign = 'right';
-    fCtx.fillText(`第 ${idx + 1} 頁 / 共 ${totalPages} 頁`, A4_W - MARGIN_X, A4_H - 18);
+    fCtx.fillText(txt.footerPage(idx + 1, totalPages), A4_W - MARGIN_X, A4_H - 18);
     fCtx.textAlign = 'left';
   });
 

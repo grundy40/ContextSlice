@@ -10,6 +10,7 @@ import {
   YAxis,
 } from 'recharts';
 import { assembleDynamicContext } from '../engine/contextAssembler';
+import { useI18n } from '../i18n';
 import {
   BenchmarkRow,
   ContextAssemblyResult,
@@ -36,6 +37,7 @@ interface TrendTooltipProps {
 }
 
 function SessionTrendTooltip({ active, payload }: TrendTooltipProps) {
+  const { t } = useI18n();
   if (!active || !payload || payload.length === 0) return null;
   const item = payload[0].payload;
   return (
@@ -46,15 +48,15 @@ function SessionTrendTooltip({ active, payload }: TrendTooltipProps) {
       </div>
       <div className="text-slate-300 max-w-[220px] truncate">{item.querySummary}</div>
       <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 font-mono tabular-nums pt-0.5">
-        <span className="text-slate-400">送給 AI</span>
+        <span className="text-slate-400">{t.dashboard.tooltipInjected}</span>
         <span className="text-right text-sky-300 font-semibold">
           {item.injectedTokens.toLocaleString()} tk
         </span>
-        <span className="text-slate-400">上限設定</span>
+        <span className="text-slate-400">{t.dashboard.tooltipBudget}</span>
         <span className="text-right text-amber-300">
           {item.budgetTokens.toLocaleString()} tk
         </span>
-        <span className="text-slate-400">使用比例</span>
+        <span className="text-slate-400">{t.dashboard.tooltipUtil}</span>
         <span
           className={`text-right font-semibold ${
             item.utilizationPercent > 100 ? 'text-rose-400' : 'text-emerald-400'
@@ -62,8 +64,8 @@ function SessionTrendTooltip({ active, payload }: TrendTooltipProps) {
         >
           {item.utilizationPercent}%
         </span>
-        <span className="text-slate-400">自動補齊</span>
-        <span className="text-right text-emerald-300">{item.autoExpandedCount} 處</span>
+        <span className="text-slate-400">{t.dashboard.tooltipAutoExpanded}</span>
+        <span className="text-right text-emerald-300">{t.dashboard.tooltipPlaces(item.autoExpandedCount)}</span>
       </div>
     </div>
   );
@@ -80,6 +82,7 @@ export function SavingsDashboardView({
   onSetOverride,
   onSelectNode,
 }: SavingsDashboardViewProps) {
+  const { locale, t } = useI18n();
   const { metrics, nodePlans } = assembly;
   const maxBar = Math.max(1, metrics.traditionalTotalTokens);
   const [benchmarkRows, setBenchmarkRows] = useState<BenchmarkRow[] | null>(null);
@@ -124,13 +127,13 @@ export function SavingsDashboardView({
 
         let reason: string;
         if (inDegree >= 2) {
-          reason = `被 ${inDegree} 處程式呼叫（高入度共用介面），改為僅顯示簽名即可讓 AI 看懂參數與回傳型別`;
+          reason = t.dashboard.throttleReasonInDegree(inDegree);
         } else if (plan.autoExpanded) {
-          reason = `系統因關聯度較高自動展開（${plan.node.lineCount} 行），若本次不改內部實作，保留簽名即可省下 ${savingsTokens} tk`;
+          reason = t.dashboard.throttleReasonAutoExpanded(plan.node.lineCount, savingsTokens);
         } else if (crossFileCount > 0) {
-          reason = `跨檔案關聯節點（連結 ${crossFileCount} 條跨檔邊），保留簽名外框即可維持跨檔呼叫正確性`;
+          reason = t.dashboard.throttleReasonCrossFile(crossFileCount);
         } else {
-          reason = `非本次修改焦點但佔用 ${plan.injectedTokens} tk，改為僅顯示簽名可立即釋放 ${savingsPercent}% 額度`;
+          reason = t.dashboard.throttleReasonDefault(plan.injectedTokens, savingsPercent);
         }
 
         return {
@@ -162,7 +165,7 @@ export function SavingsDashboardView({
       projectedTokens,
       projectedUtilPercent,
     };
-  }, [workspace.edges, nodePlans, assembly.totalInjectedTokens, assembly.budgetTokens]);
+  }, [workspace.edges, nodePlans, assembly.totalInjectedTokens, assembly.budgetTokens, t.dashboard]);
 
   const applyAllThrottleRecommendations = () => {
     for (const item of throttleAnalysis.candidates) {
@@ -192,21 +195,21 @@ export function SavingsDashboardView({
     }> = [
       {
         id: 'bench-current',
-        label: '情境 A：目前任務設定',
+        label: t.dashboard.benchScenarioA,
         query: currentQuery || callableNodes[0]?.name || 'main',
         hops: maxHops,
         budget: assembly.budgetTokens,
       },
       {
         id: 'bench-tight',
-        label: '情境 B：小額度精簡（1層 / 4K）',
+        label: t.dashboard.benchScenarioB,
         query: secondTarget,
         hops: 1,
         budget: 4000,
       },
       {
         id: 'bench-deep',
-        label: '情境 C：深度關聯（2層 / 16K）',
+        label: t.dashboard.benchScenarioC,
         query: thirdTarget,
         hops: 2,
         budget: 16000,
@@ -223,6 +226,7 @@ export function SavingsDashboardView({
         budgetTokens: sc.budget,
         maxHops: sc.hops,
         autoExpandClusters,
+        locale,
       });
       const elapsedMs = Number((performance.now() - t0).toFixed(2));
       return {
@@ -258,38 +262,38 @@ export function SavingsDashboardView({
 
   const bars = [
     {
-      label: '傳統做法：裝 20 個工具 + 完整讀檔（說明書佔掉一大塊）',
+      label: t.dashboard.taxBarTrad,
       tokens: metrics.traditionalTotalTokens,
       taxTokens: metrics.traditionalSkillAndMcpTax,
       codeTokens: metrics.traditionalMultiTurnReadBloat,
-      taxNote: `工具說明書就佔 ${metrics.traditionalSkillAndMcpTax.toLocaleString()} tk`,
+      taxNote: t.dashboard.taxBarTradNote(metrics.traditionalSkillAndMcpTax.toLocaleString()),
       barColor: 'bg-rose-500/80',
       taxColor: 'bg-rose-400',
     },
     {
-      label: '極簡 1 工具模式（推薦：只裝 1 個自動切片工具）',
+      label: t.dashboard.taxBarThin,
       tokens: metrics.thinMcpTotalTokens,
       taxTokens: metrics.thinMcpSchemaTax,
       codeTokens: metrics.slicedCodeTokens,
-      taxNote: `只花 1 個工具說明 ${metrics.thinMcpSchemaTax} tk`,
+      taxNote: t.dashboard.taxBarThinNote(metrics.thinMcpSchemaTax),
       barColor: 'bg-amber-400/80',
       taxColor: 'bg-amber-300',
     },
     {
-      label: '免裝工具模式（不掛 MCP，只寫一句超短規則讓 AI 自己讀檔）',
+      label: t.dashboard.taxBarZero,
       tokens: metrics.zeroTaxTotalTokens + metrics.zeroMcpRuleTax,
       taxTokens: metrics.zeroMcpRuleTax,
       codeTokens: metrics.slicedCodeTokens,
-      taxNote: `免工具費 · 只用 ${metrics.zeroMcpRuleTax} tk 短規則`,
+      taxNote: t.dashboard.taxBarZeroNote(metrics.zeroMcpRuleTax),
       barColor: 'bg-sky-400/85',
       taxColor: 'bg-sky-300',
     },
     {
-      label: '直接複製 / 腳本整理好再貼給 AI（最省、零額外花費）',
+      label: t.dashboard.taxBarDirect,
       tokens: metrics.zeroTaxTotalTokens,
       taxTokens: 0,
       codeTokens: metrics.slicedCodeTokens,
-      taxNote: '0 額外花費（全部額度都留給程式碼）',
+      taxNote: t.dashboard.taxBarDirectNote,
       barColor: 'bg-emerald-400/85',
       taxColor: 'bg-emerald-300',
     },
@@ -300,72 +304,72 @@ export function SavingsDashboardView({
       {/* 4-Column Metric Strip */}
       <div className="grid grid-cols-2 xl:grid-cols-4 border border-slate-800/80 bg-[#111827] rounded-lg divide-y xl:divide-y-0 xl:divide-x divide-slate-800/80">
         <div className="p-4">
-          <div className="text-xs text-slate-400">原本全部程式碼大小</div>
+          <div className="text-xs text-slate-400">{t.dashboard.rawTitle}</div>
           <div className="mt-1.5 text-2xl font-mono font-semibold tabular-nums text-slate-100">
             {metrics.rawRepoTokens.toLocaleString()}
             <span className="ml-1.5 text-xs font-normal text-slate-400">tokens</span>
           </div>
-          <div className="mt-1 text-xs text-slate-500">如果不精簡，直接全貼給 AI 的量</div>
+          <div className="mt-1 text-xs text-slate-500">{t.dashboard.rawNote}</div>
         </div>
 
         <div className="p-4">
-          <div className="text-xs text-slate-400">精簡整理後的大小</div>
+          <div className="text-xs text-slate-400">{t.dashboard.slicedTitle}</div>
           <div className="mt-1.5 text-2xl font-mono font-semibold tabular-nums text-emerald-400">
             {metrics.slicedCodeTokens.toLocaleString()}
             <span className="ml-1.5 text-xs font-normal text-slate-400">tokens</span>
           </div>
           <div className="mt-1 text-xs text-emerald-400/90 tabular-nums">
-            體積縮小了 {metrics.codeReductionPercent}%
+            {t.dashboard.slicedNote(metrics.codeReductionPercent)}
           </div>
         </div>
 
         <div className="p-4">
-          <div className="text-xs text-slate-400">傳統 AI 工具的總花費</div>
+          <div className="text-xs text-slate-400">{t.dashboard.tradTitle}</div>
           <div className="mt-1.5 text-2xl font-mono font-semibold tabular-nums text-rose-400">
             {metrics.traditionalTotalTokens.toLocaleString()}
             <span className="ml-1.5 text-xs font-normal text-slate-400">tokens</span>
           </div>
           <div className="mt-1 text-xs text-slate-400 tabular-nums">
-            光工具說明書就先扣 {metrics.traditionalSkillAndMcpTax.toLocaleString()} tk
+            {t.dashboard.tradNote(metrics.traditionalSkillAndMcpTax.toLocaleString())}
           </div>
         </div>
 
         <div className="p-4">
-          <div className="text-xs text-slate-400">總共幫你省下</div>
+          <div className="text-xs text-slate-400">{t.dashboard.savedTitle}</div>
           <div className="mt-1.5 text-2xl font-mono font-semibold tabular-nums text-sky-400">
             {metrics.netSavingsVsTraditionalPercent}%
           </div>
           <div className="mt-1 text-xs text-slate-400 tabular-nums">
-            每次問 AI 少花 {(metrics.traditionalTotalTokens - metrics.zeroTaxTotalTokens).toLocaleString()} tokens
+            {t.dashboard.savedNote((metrics.traditionalTotalTokens - metrics.zeroTaxTotalTokens).toLocaleString())}
           </div>
         </div>
       </div>
 
       {/* Mini-Line Chart: Last 10 Session States Token Budget Trend */}
       <section
-        aria-label="最近 10 次操作的 Token 花費變化"
+        aria-label={t.dashboard.trendAria}
         className="border border-slate-800/80 bg-[#111827] rounded-lg p-5"
       >
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
           <div>
             <h3 className="text-sm font-semibold text-slate-100">
-              最近 10 次操作的 Token 花費變化
+              {t.dashboard.trendTitle}
             </h3>
             <p className="mt-0.5 text-xs text-slate-400">
-              每次你改搜尋字、調上限或自動補齊程式，這裡都會記下來，方便比較哪種設定最剛好
+              {t.dashboard.trendDesc}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-4 text-[11px] font-mono tabular-nums">
             <span className="flex items-center gap-1.5 text-sky-300">
               <span className="w-2.5 h-0.5 bg-sky-400 inline-block" />
-              實際送出量
+              {t.dashboard.trendLegendActual}
             </span>
             <span className="flex items-center gap-1.5 text-amber-300">
               <span className="w-2.5 h-0.5 border-t border-dashed border-amber-400 inline-block" />
-              設定的上限
+              {t.dashboard.trendLegendBudget}
             </span>
             <span className="text-slate-400">
-              {sessionHistory.length}/10 筆（跨重整保存）· 平均用掉 {avgUtil}% · 最高 {peakTokens.toLocaleString()} tk
+              {t.dashboard.trendSummary(sessionHistory.length, avgUtil, peakTokens.toLocaleString())}
             </span>
             {sessionHistory.length > 1 && (
               <button
@@ -374,7 +378,7 @@ export function SavingsDashboardView({
                 className="px-2 py-1 rounded border border-slate-800 bg-[#0B0F17] hover:bg-slate-800 text-slate-400 hover:text-slate-200 flex items-center gap-1 cursor-pointer transition-colors"
               >
                 <Trash2 className="w-3 h-3" />
-                清空紀錄
+                {t.dashboard.trendClear}
               </button>
             )}
           </div>
@@ -402,7 +406,7 @@ export function SavingsDashboardView({
                 <Line
                   type="monotone"
                   dataKey="budgetTokens"
-                  name="上限設定"
+                  name={t.dashboard.trendSeriesBudget}
                   stroke="#FBBF24"
                   strokeWidth={1.5}
                   strokeDasharray="4 4"
@@ -412,7 +416,7 @@ export function SavingsDashboardView({
                 <Line
                   type="monotone"
                   dataKey="injectedTokens"
-                  name="實際送出"
+                  name={t.dashboard.trendSeriesActual}
                   stroke="#38BDF8"
                   strokeWidth={2}
                   dot={{ r: 3.5, fill: '#38BDF8', stroke: '#0B0F17', strokeWidth: 1.5 }}
@@ -423,7 +427,7 @@ export function SavingsDashboardView({
             </ResponsiveContainer>
           ) : (
             <div className="h-full flex items-center justify-center text-xs text-slate-500">
-              還沒有操作紀錄
+              {t.dashboard.trendEmpty}
             </div>
           )}
         </div>
@@ -431,7 +435,7 @@ export function SavingsDashboardView({
 
       {/* Smart Throttling Strategy (Dependency Graph Analysis) */}
       <section
-        aria-label="智能節流策略"
+        aria-label={t.dashboard.throttleAria}
         className="border border-sky-500/25 bg-[#111827] rounded-lg p-5 space-y-4"
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -439,16 +443,16 @@ export function SavingsDashboardView({
             <div className="flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
               <h3 className="text-sm font-semibold text-slate-100">
-                智能節流策略（依賴圖分析建議）
+                {t.dashboard.throttleTitle}
               </h3>
               {throttleAnalysis.manualSkeletonPlans.length > 0 && (
                 <span className="px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-[11px] font-mono text-amber-300">
-                  已手動套用 {throttleAnalysis.manualSkeletonPlans.length} 項「僅顯示簽名」
+                  {t.dashboard.throttleManualBadge(throttleAnalysis.manualSkeletonPlans.length)}
                 </span>
               )}
             </div>
             <p className="text-xs text-slate-400">
-              根據依賴圖的呼叫入度、跨檔關聯與目前 Token 佔比，找出不需展開實作細節的節點，建議手動設為「僅顯示簽名」以最大化 Token 效率
+              {t.dashboard.throttleDesc}
             </p>
           </div>
 
@@ -460,7 +464,7 @@ export function SavingsDashboardView({
                 className="px-2.5 py-1.5 text-xs border border-slate-700 bg-[#0B0F17] hover:bg-slate-800 text-slate-300 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer"
               >
                 <RotateCcw className="w-3 h-3" />
-                還原自動判斷
+                {t.dashboard.throttleReset}
               </button>
             )}
             {throttleAnalysis.candidates.length > 0 && (
@@ -470,7 +474,7 @@ export function SavingsDashboardView({
                 className="px-3 py-1.5 text-xs font-semibold bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer"
               >
                 <SlidersHorizontal className="w-3.5 h-3.5" />
-                一鍵套用 {throttleAnalysis.candidates.length} 項建議
+                {t.dashboard.throttleApplyAll(throttleAnalysis.candidates.length)}
               </button>
             )}
           </div>
@@ -480,23 +484,23 @@ export function SavingsDashboardView({
           <>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="rounded-md border border-slate-800 bg-[#0B0F17] px-3.5 py-2.5">
-                <div className="text-[11px] text-slate-400">建議設為「僅顯示簽名」</div>
+                <div className="text-[11px] text-slate-400">{t.dashboard.throttleCandidatesLabel}</div>
                 <div className="mt-1 text-base font-mono font-semibold text-amber-300 tabular-nums">
-                  {throttleAnalysis.candidates.length} 個節點
+                  {t.dashboard.throttleCandidatesCount(throttleAnalysis.candidates.length)}
                 </div>
               </div>
               <div className="rounded-md border border-slate-800 bg-[#0B0F17] px-3.5 py-2.5">
-                <div className="text-[11px] text-slate-400">套用後可再省下</div>
+                <div className="text-[11px] text-slate-400">{t.dashboard.throttleSavingsLabel}</div>
                 <div className="mt-1 text-base font-mono font-semibold text-emerald-400 tabular-nums">
                   -{throttleAnalysis.totalPotentialSavings.toLocaleString()} tokens
                 </div>
               </div>
               <div className="rounded-md border border-slate-800 bg-[#0B0F17] px-3.5 py-2.5">
-                <div className="text-[11px] text-slate-400">預估優化後送出量</div>
+                <div className="text-[11px] text-slate-400">{t.dashboard.throttleProjectedLabel}</div>
                 <div className="mt-1 text-base font-mono font-semibold text-sky-300 tabular-nums">
                   {throttleAnalysis.projectedTokens.toLocaleString()} tk
                   <span className="ml-1.5 text-xs font-normal text-slate-400">
-                    （佔上限 {throttleAnalysis.projectedUtilPercent}%）
+                    {t.dashboard.throttleProjectedNote(throttleAnalysis.projectedUtilPercent)}
                   </span>
                 </div>
               </div>
@@ -523,11 +527,11 @@ export function SavingsDashboardView({
                           {plan.node.filePath}:{plan.node.startLine}-{plan.node.endLine}
                         </span>
                         <span className="px-1.5 py-0.5 rounded bg-slate-800/90 text-[10px] font-mono text-slate-300">
-                          入度 {item.inDegree} · 出度 {item.outDegree}
+                          {t.dashboard.throttleInOut(item.inDegree, item.outDegree)}
                         </span>
                         {item.crossFileCount > 0 && (
                           <span className="px-1.5 py-0.5 rounded bg-sky-500/10 text-[10px] font-mono text-sky-300">
-                            跨檔 {item.crossFileCount} 邊
+                            {t.dashboard.throttleCrossFile(item.crossFileCount)}
                           </span>
                         )}
                       </div>
@@ -544,7 +548,7 @@ export function SavingsDashboardView({
                           </span>
                         </div>
                         <div className="text-emerald-400">
-                          省 {item.savingsTokens} tk (-{item.savingsPercent}%)
+                          {t.dashboard.throttleSaveLine(item.savingsTokens, item.savingsPercent)}
                         </div>
                       </div>
 
@@ -553,7 +557,7 @@ export function SavingsDashboardView({
                         onClick={() => onSetOverride(plan.node.id, 'skeleton')}
                         className="px-2.5 py-1.5 rounded border border-amber-400/40 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 text-xs font-medium whitespace-nowrap transition-colors cursor-pointer"
                       >
-                        設為僅顯示簽名
+                        {t.dashboard.throttleSetBtn}
                       </button>
                     </div>
                   </div>
@@ -564,7 +568,7 @@ export function SavingsDashboardView({
         ) : (
           <div className="rounded-md border border-emerald-500/25 bg-emerald-500/5 px-4 py-3 text-xs text-emerald-300 flex items-center justify-between gap-3">
             <span>
-              依賴圖檢查完成：目前非核心節點已經處於最佳精簡狀態，或已沒有體積較大且可改為「僅顯示簽名」的完整節點。
+              {t.dashboard.throttleOptimal}
             </span>
           </div>
         )}
@@ -575,14 +579,14 @@ export function SavingsDashboardView({
         <div className="flex flex-wrap items-baseline justify-between gap-2 mb-4">
           <div>
             <h3 className="text-sm font-semibold text-slate-100">
-              不同用法差多少 Token？（為什麼不要裝一堆工具？）
+              {t.dashboard.taxTitle}
             </h3>
             <p className="mt-0.5 text-xs text-slate-400">
-              工具裝太多時，每次對話 AI 都要先重讀一大疊說明書；把挑選程式的工作移到外面做，就能省下大量無謂花費
+              {t.dashboard.taxDesc}
             </p>
           </div>
           <span className="text-xs font-mono tabular-nums text-slate-400">
-            比較基準：問一次修改任務
+            {t.dashboard.taxBaseline}
           </span>
         </div>
 
@@ -606,13 +610,13 @@ export function SavingsDashboardView({
                     <div
                       className={`h-full ${item.taxColor}`}
                       style={{ width: `${Math.max(0.8, taxPct)}%` }}
-                      title={`協議與規則稅：${item.taxTokens} tokens`}
+                      title={t.dashboard.taxTooltipProtocol(item.taxTokens)}
                     />
                   )}
                   <div
                     className={`h-full ${item.barColor}`}
                     style={{ width: `${Math.max(1.2, codePct)}%` }}
-                    title={`代碼上下文：${item.codeTokens} tokens`}
+                    title={t.dashboard.taxTooltipCode(item.codeTokens)}
                   />
                 </div>
               </div>
@@ -626,10 +630,10 @@ export function SavingsDashboardView({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-semibold text-slate-100">
-              多任務實戰基準測試（Benchmark）
+              {t.dashboard.benchTitle}
             </h3>
             <p className="mt-0.5 text-xs text-slate-400">
-              直接用目前載入的專案程式碼，實測三種常見任務與預算下的精簡效率與運算速度
+              {t.dashboard.benchDesc}
             </p>
           </div>
           <button
@@ -639,7 +643,7 @@ export function SavingsDashboardView({
             className="px-3.5 py-2 text-xs font-semibold bg-sky-500 hover:bg-sky-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
           >
             <Play className="w-3.5 h-3.5" />
-            {benchmarkRows ? '重新跑一次實測' : '跑 3 種情境實測'}
+            {benchmarkRows ? t.dashboard.benchRunAgain : t.dashboard.benchRun}
           </button>
         </div>
 
@@ -648,14 +652,14 @@ export function SavingsDashboardView({
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-800/80 bg-[#0E1420] text-[11px] font-medium text-slate-400">
-                  <th className="py-2 px-3">測試情境</th>
-                  <th className="py-2 px-3">搜尋關鍵字</th>
-                  <th className="py-2 px-3 text-right">傳統總花費</th>
-                  <th className="py-2 px-3 text-right">實測精簡量</th>
-                  <th className="py-2 px-3 text-right">總省下</th>
-                  <th className="py-2 px-3 text-right">自動補齊</th>
-                  <th className="py-2 px-3 text-right">耗時</th>
-                  <th className="py-2 px-3 text-right">預算狀態</th>
+                  <th className="py-2 px-3">{t.dashboard.benchColScenario}</th>
+                  <th className="py-2 px-3">{t.dashboard.benchColQuery}</th>
+                  <th className="py-2 px-3 text-right">{t.dashboard.benchColTrad}</th>
+                  <th className="py-2 px-3 text-right">{t.dashboard.benchColSliced}</th>
+                  <th className="py-2 px-3 text-right">{t.dashboard.benchColSaved}</th>
+                  <th className="py-2 px-3 text-right">{t.dashboard.benchColAuto}</th>
+                  <th className="py-2 px-3 text-right">{t.dashboard.benchColTime}</th>
+                  <th className="py-2 px-3 text-right">{t.dashboard.benchColStatus}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 text-xs">
@@ -673,7 +677,7 @@ export function SavingsDashboardView({
                       {row.reductionPercent}%
                     </td>
                     <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-300">
-                      {row.autoExpandedCount} 處
+                      {t.dashboard.tooltipPlaces(row.autoExpandedCount)}
                     </td>
                     <td className="py-2 px-3 text-right font-mono tabular-nums text-slate-400">
                       {row.elapsedMs} ms
@@ -686,7 +690,7 @@ export function SavingsDashboardView({
                             : 'bg-rose-500/15 text-rose-300'
                         }`}
                       >
-                        {row.withinBudget ? '額度內通過' : '超出上限'}
+                        {row.withinBudget ? t.dashboard.benchWithin : t.dashboard.benchOver}
                       </span>
                     </td>
                   </tr>
@@ -696,7 +700,7 @@ export function SavingsDashboardView({
           </div>
         ) : (
           <div className="rounded-md border border-dashed border-slate-800 bg-[#0B0F17] py-4 px-4 text-xs text-slate-500 text-center">
-            點擊右上角「跑 3 種情境實測」，系統會立即用目前專案跑完基準測試並列出比較結果
+            {t.dashboard.benchEmpty}
           </div>
         )}
       </section>
@@ -704,9 +708,9 @@ export function SavingsDashboardView({
       {/* High-Density Symbol Breakdown Table */}
       <section className="border border-slate-800/80 bg-[#111827] rounded-lg overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-800/80 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-slate-100">每個函式佔用多少 Token（可單獨調整）</h3>
+          <h3 className="text-sm font-semibold text-slate-100">{t.dashboard.breakdownTitle}</h3>
           <span className="text-xs font-mono tabular-nums text-slate-400">
-            共 {nodePlans.length} 個函式 / 區塊
+            {t.dashboard.breakdownCount(nodePlans.length)}
           </span>
         </div>
 
@@ -714,13 +718,13 @@ export function SavingsDashboardView({
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="border-b border-slate-800/80 bg-[#0E1420] text-[11px] font-medium text-slate-400">
-                <th className="py-2.5 px-4">函式名稱與位置</th>
-                <th className="py-2.5 px-3 text-right">行數</th>
-                <th className="py-2.5 px-3 text-right">原本大小</th>
-                <th className="py-2.5 px-3 text-right">實際送出</th>
-                <th className="py-2.5 px-3 text-right">省下</th>
-                <th className="py-2.5 px-3">關聯距離</th>
-                <th className="py-2.5 px-4 text-right">要給 AI 看多少</th>
+                <th className="py-2.5 px-4">{t.dashboard.breakdownColName}</th>
+                <th className="py-2.5 px-3 text-right">{t.dashboard.breakdownColLines}</th>
+                <th className="py-2.5 px-3 text-right">{t.dashboard.breakdownColRaw}</th>
+                <th className="py-2.5 px-3 text-right">{t.dashboard.breakdownColInjected}</th>
+                <th className="py-2.5 px-3 text-right">{t.dashboard.breakdownColSaved}</th>
+                <th className="py-2.5 px-3">{t.dashboard.breakdownColHop}</th>
+                <th className="py-2.5 px-4 text-right">{t.dashboard.breakdownColOverride}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 text-xs">
@@ -767,10 +771,10 @@ export function SavingsDashboardView({
                     </td>
                     <td className="py-2 px-3 text-slate-300 whitespace-nowrap">
                       {plan.hopDistance === 0
-                        ? '修改重點'
+                        ? t.dashboard.hopFocal
                         : plan.hopDistance !== null
-                          ? `隔 ${plan.hopDistance} 層`
-                          : '無直接關聯'}
+                          ? t.dashboard.hopDist(plan.hopDistance)
+                          : t.dashboard.hopUnrelated}
                     </td>
                     <td className="py-2 px-4 text-right">
                       <div className="inline-flex items-center p-0.5 bg-[#0B0F17] border border-slate-800 rounded">
@@ -785,13 +789,7 @@ export function SavingsDashboardView({
                                 : 'text-slate-400 hover:text-slate-200'
                             }`}
                           >
-                            {mode === 'auto'
-                              ? '自動'
-                              : mode === 'full'
-                                ? '給完整'
-                                : mode === 'skeleton'
-                                  ? '只留外框'
-                                  : '略過'}
+                            {t.graph.overrideMode[mode]}
                           </button>
                         ))}
                       </div>

@@ -1,4 +1,5 @@
 import { FolderOpen, RotateCcw, Search, Sparkles, Zap } from 'lucide-react';
+import { useI18n } from '../i18n';
 
 interface ToolbarControlsProps {
   projectLabel: string;
@@ -53,19 +54,20 @@ export function ToolbarControls({
   onResetOverrides,
   overrideCount,
 }: ToolbarControlsProps) {
+  const { t } = useI18n();
   return (
     <section
-      aria-label="切片策略控制列"
+      aria-label={t.toolbar.aria}
       className="shrink-0 border-b border-slate-800/80 bg-[#111827] px-6 py-3 flex flex-wrap items-center justify-between gap-4"
     >
       {/* Left: Active Workspace Badge & Query Input */}
       <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[320px]">
         <div
           className="h-9 bg-[#0B0F17] border border-slate-700/80 rounded-md px-3 text-xs font-medium text-slate-200 flex items-center gap-2 max-w-[260px]"
-          title="當前匯入的專案或資料夾"
+          title={t.toolbar.workspaceTitle}
         >
           <FolderOpen className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-          <span className="truncate">{fileCount > 0 ? projectLabel : '尚未匯入專案'}</span>
+          <span className="truncate">{fileCount > 0 ? projectLabel : t.toolbar.noProject}</span>
           {fileCount > 0 && (
             <span className="text-[11px] font-mono tabular-nums text-slate-400 shrink-0">
               ({fileCount})
@@ -84,7 +86,7 @@ export function ToolbarControls({
                 onAutoFocusByQuery();
               }
             }}
-            placeholder="輸入任務或關鍵字 (支援 CJK + 中英對照 / 支援多目錄)..."
+            placeholder={t.toolbar.searchPlaceholder}
             className="w-full h-9 bg-[#0B0F17] border border-slate-700/80 focus:border-sky-500 rounded-md pl-9 pr-3 text-xs text-slate-100 placeholder-slate-500 focus:outline-none transition-colors"
           />
         </div>
@@ -102,9 +104,9 @@ export function ToolbarControls({
                 ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
-            title="僅包含直接相關節點 (1-hop)"
+            title={t.toolbar.hop1Title}
           >
-            1層相關
+            {t.toolbar.hop1Label}
           </button>
           <button
             type="button"
@@ -114,9 +116,9 @@ export function ToolbarControls({
                 ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30'
                 : 'text-slate-400 hover:text-slate-200'
             }`}
-            title="包含 2 層依賴擴展 (2-hop)"
+            title={t.toolbar.hop2Title}
           >
-            2層相關
+            {t.toolbar.hop2Label}
           </button>
         </div>
 
@@ -129,10 +131,10 @@ export function ToolbarControls({
               ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
               : 'bg-[#0B0F17] border-slate-800 text-slate-400 hover:text-slate-200'
           }`}
-          title="自動偵測高複雜度叢集並在預算內展開"
+          title={t.toolbar.autoExpandTitle}
         >
           <Sparkles className="w-3.5 h-3.5" />
-          <span>自動補齊 ({autoExpandedCount})</span>
+          <span>{t.toolbar.autoExpandLabel(autoExpandedCount)}</span>
         </button>
 
         {/* Reset Manual Overrides */}
@@ -141,21 +143,21 @@ export function ToolbarControls({
             type="button"
             onClick={onResetOverrides}
             className="h-9 px-2.5 text-xs font-medium bg-[#0B0F17] border border-slate-800 hover:border-slate-700 text-slate-300 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer"
-            title="清除所有手動釘選或覆寫狀態"
+            title={t.toolbar.resetOverridesTitle}
           >
             <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
-            <span>重置 ({overrideCount})</span>
+            <span>{t.toolbar.resetOverrides(overrideCount)}</span>
           </button>
         )}
 
         {/* Token Budget Selector */}
         <div className="flex items-center gap-2 bg-[#0B0F17] border border-slate-800 rounded-md px-3 h-9">
           <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-          <span className="text-xs text-slate-400">Token 上限:</span>
+          <span className="text-xs text-slate-400">{t.toolbar.budgetLabel}</span>
           <select
             value={budgetTokens}
             onChange={(e) => onChangeBudget(Number(e.target.value))}
-            aria-label="Token 上限選擇"
+            aria-label={t.toolbar.budgetAria}
             className="bg-transparent text-xs font-mono font-medium text-slate-200 focus:outline-none cursor-pointer"
           >
             {BUDGET_OPTIONS.map((b) => (

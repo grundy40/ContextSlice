@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import { Check, Eraser, Pencil, RefreshCw, Sparkles, Tag, X } from 'lucide-react';
+import { Check, Eraser, Languages, Pencil, RefreshCw, Sparkles, Tag, X } from 'lucide-react';
+import { useI18n } from '../i18n';
 import { ProjectTagColor, ProjectTagConfig, WorkspaceView } from '../types/context';
 import { APP_VERSION } from '../version';
 
@@ -26,57 +27,44 @@ interface HeaderBarProps {
   onSaveProjectTag?: (tag: ProjectTagConfig | null) => void;
 }
 
-const NAV_ITEMS: Array<{ id: WorkspaceView; label: string }> = [
-  { id: 'graph', label: '程式關聯圖' },
-  { id: 'dashboard', label: '省量與趨勢' },
-  { id: 'diff', label: '精簡前後對照' },
-];
+const NAV_VIEW_IDS: WorkspaceView[] = ['graph', 'dashboard', 'diff'];
 
 const TAG_COLOR_OPTIONS: Array<{
   id: ProjectTagColor;
-  label: string;
   dotClass: string;
   badgeClass: string;
 }> = [
   {
     id: 'sky',
-    label: '天藍',
     dotClass: 'bg-sky-400',
     badgeClass: 'border-sky-500/40 bg-sky-500/15 text-sky-200 hover:bg-sky-500/20',
   },
   {
     id: 'emerald',
-    label: '翠綠',
     dotClass: 'bg-emerald-400',
     badgeClass: 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/20',
   },
   {
     id: 'amber',
-    label: '琥珀',
     dotClass: 'bg-amber-400',
     badgeClass: 'border-amber-500/40 bg-amber-500/15 text-amber-200 hover:bg-amber-500/20',
   },
   {
     id: 'violet',
-    label: '紫羅蘭',
     dotClass: 'bg-violet-400',
     badgeClass: 'border-violet-500/40 bg-violet-500/15 text-violet-200 hover:bg-violet-500/20',
   },
   {
     id: 'rose',
-    label: '玫瑰',
     dotClass: 'bg-rose-400',
     badgeClass: 'border-rose-500/40 bg-rose-500/15 text-rose-200 hover:bg-rose-500/20',
   },
   {
     id: 'slate',
-    label: '石板灰',
     dotClass: 'bg-slate-400',
     badgeClass: 'border-slate-600/70 bg-slate-800/80 text-slate-200 hover:bg-slate-700/80',
   },
 ];
-
-const QUICK_TAG_SUGGESTIONS = ['核心功能', '後端 API', '前端介面', 'Bug 修復', '重構中'];
 
 export function HeaderBar({
   activeView,
@@ -88,10 +76,12 @@ export function HeaderBar({
   cleanupStatus = 'idle',
   onQuickCleanup,
   proactiveExpansion,
-  projectName = '目前專案',
+  projectName,
   projectTag = null,
   onSaveProjectTag,
 }: HeaderBarProps) {
+  const { toggleLocale, t } = useI18n();
+  const displayProjectName = projectName ?? t.header.defaultProjectName;
   const [pulseActive, setPulseActive] = useState(false);
   const [tagEditorOpen, setTagEditorOpen] = useState(false);
   const [draftLabel, setDraftLabel] = useState(projectTag?.label ?? '');
@@ -110,7 +100,7 @@ export function HeaderBar({
   useEffect(() => {
     setDraftLabel(projectTag?.label ?? '');
     setDraftColor(projectTag?.color ?? 'sky');
-  }, [projectTag?.label, projectTag?.color, projectName]);
+  }, [projectTag?.label, projectTag?.color, displayProjectName]);
 
   useEffect(() => {
     if (!tagEditorOpen) return;
@@ -179,7 +169,7 @@ export function HeaderBar({
               type="button"
               onClick={handleOpenTagEditor}
               aria-expanded={tagEditorOpen}
-              title={`為「${projectName}」設定分類標籤與顏色（自動記憶於本機）`}
+              title={t.header.tagTooltip(displayProjectName)}
               className={`px-2.5 py-1 rounded-md border text-[11px] font-medium flex items-center gap-1.5 transition-colors cursor-pointer ${
                 projectTag?.label
                   ? activeColorMeta.badgeClass
@@ -195,7 +185,7 @@ export function HeaderBar({
               ) : (
                 <>
                   <Tag className="w-3 h-3 text-slate-400 shrink-0" />
-                  <span>專案標籤</span>
+                  <span>{t.header.tagDefault}</span>
                 </>
               )}
             </button>
@@ -204,23 +194,23 @@ export function HeaderBar({
               <form
                 onSubmit={handleSubmitTag}
                 role="dialog"
-                aria-label="編輯專案標籤"
+                aria-label={t.header.tagEditAria}
                 className="absolute left-0 top-full mt-2 z-50 w-[304px] rounded-xl border border-slate-700/90 bg-[#111827] p-4 shadow-2xl space-y-3 whitespace-normal"
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="text-xs font-semibold text-slate-100 flex items-center gap-1.5">
                       <Tag className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                      設定專案標籤
+                      {t.header.tagSetTitle}
                     </div>
-                    <div className="text-[11px] text-slate-400 truncate mt-0.5" title={projectName}>
-                      目前專案：{projectName}
+                    <div className="text-[11px] text-slate-400 truncate mt-0.5" title={displayProjectName}>
+                      {t.header.tagCurrentProject(displayProjectName)}
                     </div>
                   </div>
                   <button
                     type="button"
                     onClick={() => setTagEditorOpen(false)}
-                    aria-label="關閉專案標籤編輯"
+                    aria-label={t.header.tagCloseAria}
                     className="p-1 rounded text-slate-400 hover:text-slate-100 hover:bg-slate-800 cursor-pointer"
                   >
                     <X className="w-3.5 h-3.5" />
@@ -229,7 +219,7 @@ export function HeaderBar({
 
                 <div className="space-y-1.5">
                   <label htmlFor="project-tag-input" className="block text-[11px] text-slate-300">
-                    分類名稱
+                    {t.header.tagNameLabel}
                   </label>
                   <input
                     id="project-tag-input"
@@ -238,11 +228,11 @@ export function HeaderBar({
                     maxLength={24}
                     value={draftLabel}
                     onChange={(e) => setDraftLabel(e.target.value)}
-                    placeholder="例如：核心 API、重構中、Bug 修復"
+                    placeholder={t.header.tagNamePlaceholder}
                     className="w-full h-8 px-2.5 bg-[#0B0F17] border border-slate-700/80 rounded-md text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-400"
                   />
                   <div className="flex flex-wrap gap-1 pt-0.5">
-                    {QUICK_TAG_SUGGESTIONS.map((preset) => (
+                    {t.header.tagSuggestions.map((preset) => (
                       <button
                         key={preset}
                         type="button"
@@ -256,17 +246,18 @@ export function HeaderBar({
                 </div>
 
                 <div className="space-y-1.5">
-                  <div className="text-[11px] text-slate-300">顏色標記</div>
+                  <div className="text-[11px] text-slate-300">{t.header.tagColorLabel}</div>
                   <div className="grid grid-cols-6 gap-1.5">
                     {TAG_COLOR_OPTIONS.map((opt) => {
                       const selected = draftColor === opt.id;
+                      const colorLabel = t.header.tagColorNames[opt.id];
                       return (
                         <button
                           key={opt.id}
                           type="button"
                           onClick={() => setDraftColor(opt.id)}
-                          title={opt.label}
-                          aria-label={`顏色：${opt.label}`}
+                          title={colorLabel}
+                          aria-label={t.header.tagColorAria(colorLabel)}
                           className={`h-7 rounded-md border flex items-center justify-center transition-colors cursor-pointer ${
                             selected
                               ? 'border-slate-200 bg-slate-800'
@@ -290,13 +281,13 @@ export function HeaderBar({
                     onClick={handleClearTag}
                     className="px-2 py-1 text-[11px] text-slate-400 hover:text-rose-300 cursor-pointer transition-colors"
                   >
-                    清除標籤
+                    {t.header.tagClear}
                   </button>
                   <button
                     type="submit"
                     className="px-3 py-1.5 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-md cursor-pointer transition-colors"
                   >
-                    儲存標籤
+                    {t.header.tagSave}
                   </button>
                 </div>
               </form>
@@ -306,19 +297,19 @@ export function HeaderBar({
       </div>
 
       {/* Zone 2: Clean single-line view links */}
-      <nav className="flex items-center gap-7" aria-label="主要視圖切換">
-        {NAV_ITEMS.map((item) => {
-          const isActive = activeView === item.id;
+      <nav className="flex items-center gap-7" aria-label={t.header.navAria}>
+        {NAV_VIEW_IDS.map((viewId) => {
+          const isActive = activeView === viewId;
           return (
             <button
-              key={item.id}
+              key={viewId}
               type="button"
-              onClick={() => onChangeView(item.id)}
+              onClick={() => onChangeView(viewId)}
               className={`relative py-2 text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 rounded ${
                 isActive ? 'text-sky-400' : 'text-slate-400 hover:text-slate-100'
               }`}
             >
-              {item.label}
+              {t.header.nav[viewId]}
               {isActive && (
                 <span className="absolute inset-x-0 -bottom-[1px] h-[2px] bg-sky-400" aria-hidden="true" />
               )}
@@ -327,13 +318,13 @@ export function HeaderBar({
         })}
       </nav>
 
-      {/* Zone 3: Unobtrusive Proactive Discovery indicator + rescan/import actions */}
-      <div className="flex items-center gap-3 shrink-0">
+      {/* Zone 3: Proactive indicator + language toggle + cleanup/rescan/import actions */}
+      <div className="flex items-center gap-2.5 shrink-0">
         {showIndicator && proactiveExpansion && (
           <div
             role="status"
             aria-live="polite"
-            title={`系統已自動展開較複雜的相關程式：${proactiveExpansion.expandedNames.join('、')}`}
+            title={t.header.proactiveTooltip(proactiveExpansion.expandedNames)}
             className={`hidden md:flex items-center gap-1.5 text-[11px] font-mono tabular-nums transition-colors duration-300 mr-1 ${
               pulseActive ? 'text-emerald-300' : 'text-slate-400'
             }`}
@@ -346,17 +337,28 @@ export function HeaderBar({
             </span>
             <Sparkles className="w-3 h-3 text-emerald-400/80 shrink-0" />
             <span className="whitespace-nowrap">
-              已自動補齊 {proactiveExpansion.expandedCount} 個重點程式 (+{proactiveExpansion.tokensAdded} tk)
+              {t.header.proactiveText(proactiveExpansion.expandedCount, proactiveExpansion.tokensAdded)}
             </span>
           </div>
         )}
+
+        <button
+          type="button"
+          onClick={toggleLocale}
+          title={t.header.langToggleTitle}
+          aria-label={t.header.langToggleAria}
+          className="px-2.5 py-2 text-xs font-medium bg-[#111827] hover:bg-slate-800 text-slate-200 border border-slate-700/80 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+        >
+          <Languages className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+          <span>{t.header.langToggleLabel}</span>
+        </button>
 
         {onQuickCleanup && (
           <button
             type="button"
             disabled={cleanupStatus === 'cleaning'}
             onClick={onQuickCleanup}
-            title="刪除舊的操作歷程快照、重設所有節點手動設定、清理過時快取並強制重掃工作區"
+            title={t.header.cleanupTooltip}
             className={`px-3 py-2 text-xs font-medium border rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 disabled:opacity-60 ${
               cleanupStatus === 'done'
                 ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
@@ -366,12 +368,12 @@ export function HeaderBar({
             {cleanupStatus === 'done' ? (
               <>
                 <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                <span>已整理完成</span>
+                <span>{t.header.cleanupDone}</span>
               </>
             ) : (
               <>
                 <Eraser className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-                <span>{cleanupStatus === 'cleaning' ? '整理中...' : '一鍵整理'}</span>
+                <span>{cleanupStatus === 'cleaning' ? t.header.cleanupBusy : t.header.cleanupIdle}</span>
               </>
             )}
           </button>
@@ -382,11 +384,11 @@ export function HeaderBar({
             type="button"
             disabled={isRescanning}
             onClick={onRescanFolder}
-            title="本機改完程式後，點這裡直接重新讀取資料夾內容"
+            title={t.header.rescanTooltip}
             className="px-3 py-2 text-xs font-medium bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-slate-100 border border-slate-700/80 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5"
           >
             <RefreshCw className={`w-3.5 h-3.5 text-sky-400 ${isRescanning ? 'animate-spin' : ''}`} />
-            {isRescanning ? '掃描中...' : '重新讀取資料夾'}
+            {isRescanning ? t.header.rescanBusy : t.header.rescanIdle}
           </button>
         )}
 
@@ -395,7 +397,7 @@ export function HeaderBar({
           onClick={onOpenImport}
           className="px-4 py-2 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
         >
-          匯入資料夾 / 檔案
+          {t.header.importBtn}
         </button>
       </div>
     </header>
