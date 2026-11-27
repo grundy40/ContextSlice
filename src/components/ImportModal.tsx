@@ -183,7 +183,7 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                   支援 TS/JS、Python、Go、C/C++、Swift、PHP、HTML/CSS、Rust、Java、C#、Ruby 等語言；所有分析都在瀏覽器本機完成，不會上傳到外部伺服器。
                 </p>
                 <p className="mt-1 text-[11px] text-slate-500">
-                  瀏覽器單次最多載入 80 個檔案（自動略過 node_modules、.git、dist 等編譯目錄、二進位檔與超過 1.5MB 檔案）
+                  瀏覽器單次最多載入 200 個檔案（自動略過 node_modules、.git、dist 等編譯目錄、二進位檔與超過 1.5MB 檔案）
                 </p>
 
                 <div className="mt-5 flex flex-wrap items-center justify-center gap-3">

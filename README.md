@@ -1,4 +1,4 @@
-# ContextSlice Studio (`v0.2.0`)
+# ContextSlice Studio (`v0.2.1`)
 
 > **幫 AI 挑重點、省 Token 的程式結構分析與精簡工作台**  
 > 在把程式碼交給 AI 之前，先自動找出要修改的函式與上下游關聯，將其他無關細節摺疊成「只留名稱與參數的外框」，大幅縮小體積並避免上下文溢位。
@@ -89,7 +89,7 @@ npm run build
 
 1. **不確定怎麼看？先點左側「新手入門引導」**：會用兩句白話快速說明左、中、右各區塊用途。
 2. **匯入你的資料夾或檔案**：點擊右上角「匯入資料夾 / 檔案」，選擇本機程式碼資料夾、多個檔案或貼上單段長程式碼即可開始分析。
-   - 若資料夾內含不支援檔案、超過 1.5MB 大檔或超過瀏覽器單次 80 檔上限，上方會顯示明確提示。
+   - 若資料夾內含不支援檔案、超過 1.5MB 大檔或超過瀏覽器單次 200 檔上限，上方會顯示明確提示。
 3. **輸入你想改的功能並選擇上限**：在上方搜尋列輸入任務（例如 `login`、`order`、`retry`），選擇 `1層相關` 或 `2層相關` 與目標 Token 上限。
 4. **直接帶走結果**：從右側面板選擇你習慣的 AI 工具方式複製、下載，或匯出為離線 PDF 說明書即可。
 
@@ -127,13 +127,17 @@ npm run build
 ├── LICENSE                              # MIT 開源授權
 └── src/
     ├── App.tsx                          # 主介面、偏好記憶、主動補齊、標籤與一鍵整理
+    ├── version.ts                       # 版本號常數定義 (APP_VERSION)
     ├── types/context.ts                 # 資料型別與基準測試定義
     ├── engine/
     │   ├── astParser.ts                 # 多語言程式解析與關聯建圖
     │   ├── contextAssembler.ts          # 相關度評分、層級分配與封包組裝
+    │   ├── cjkTokenizer.ts              # 中日韓 2-gram 分詞與 50+ 組雙語詞彙映射
+    │   ├── semanticSearch.ts            # 符號語意模糊搜尋與加權比對引擎
     │   ├── skeletonExpansion.ts         # 複雜叢集偵測與自動補齊執行器
-    │   ├── localImporter.ts             # 本機資料夾掃描與略過統計
+    │   ├── localImporter.ts             # 本機資料夾掃描與略過統計 (上限 200 檔)
     │   ├── pdfManualExporter.ts         # 離線 A4 技術摘要 PDF 匯出引擎
+    │   ├── treeSitterBundle.ts          # Base64 內嵌 web-tree-sitter 核心執行期與 WASM
     │   └── scriptGenerators.ts          # CLI / 免工具 / 1-Tool MCP 腳本產生器
     └── components/
         ├── HeaderBar.tsx                # 頂部導覽列、自動補齊指示與一鍵重讀
@@ -191,6 +195,15 @@ npm run build
 ---
 
 ## 8. 版本更新紀錄
+
+### v0.2.1（2026-11-27）
+
+- **強化多語言腳本解析器（Multi-Language AST Extractors）**：在 `scriptGenerators.ts` 補齊 Go、Rust、Java、Kotlin、C#、C/C++ 專用函式與類別宣告正則提取，徹底解決非 JS/Python 語言在 CLI 與 MCP 端的退化問題。
+- **狀態機括號匹配器（State-Machine `findBraceEnd`）**：計算括號深度前先以保留換行的遮罩演算法（`maskCommentsAndStrings`）屏蔽單行註解 `//...`、多行註解 `/*...*/`、`#...` 及字串字面量，徹底杜絕字串或註解中 `{` 導致的區塊截斷與行號偏移錯誤。
+- **真實呼叫依賴圖（True Call Graph with BFS 1-hop & 2-hop）**：建立專案全域 `SymbolMap`，透過單字邊界呼叫正則（`\bfuncName\s*\(`）建立雙向呼叫拓撲，並以 BFS 算法精確計算 1 層與 2 層（`maxHops`）呼叫關聯，取代模糊字串包含。
+- **WASM 版 Tree-sitter 實機引擎（Base64 內嵌 + 按需快取 + 優雅降級）**：新增 `src/engine/treeSitterBundle.ts` 內嵌 `web-tree-sitter@0.22.6` 純 JS 執行期與核心 WASM，使單檔 `ctxslice-mcp.mjs` 免 `npm install` 即可於首次解析時自動下載並快取各語言 `.wasm` 至 `~/.contextslice/parsers/tree-sitter-<lang>.wasm`；若處於離線或失敗環境（或設定 `CTXSLICE_DISABLE_WASM_FETCH=1`），自動無縫優雅降級回狀態機正則解析器。
+- **版號統一連動與 CLI `--version` 支援**：`scriptGenerators.ts` 改為直接引用 `src/version.ts`（`APP_VERSION`），同步更新 `ctxslice.mjs` 與 `ctxslice-mcp.mjs` 的 `--version` / `-v` 旗標、`serverInfo.version`、`tools/list` 描述與 `<context_slice version="...">` 輸出屬性。
+- **文案上限校準與依賴相容性修正**：保留瀏覽器單次 `200` 檔匯入上限並同步更新 `README.md`、`ImportModal.tsx` 與第 6 節專案結構樹（補齊 `version.ts`、`cjkTokenizer.ts`、`semanticSearch.ts`、`treeSitterBundle.ts`）；同時將 `package.json` 的 `esbuild` 升版至 `^0.28.0` 以相容 `vite@^8.3.0`，解決 `npm install` 的 `ERESOLVE` 衝突。
 
 ### v0.2.0（2026-11-27）
 

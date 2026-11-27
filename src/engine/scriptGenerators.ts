@@ -1,3 +1,8 @@
+import { APP_VERSION } from '../version';
+import { TREE_SITTER_JS_B64, TREE_SITTER_WASM_B64 } from './treeSitterBundle';
+
+const SCRIPT_VERSION = APP_VERSION.replace(/^v/, '');
+
 export interface GeneratorConfig {
   query: string;
   budgetTokens: number;
@@ -111,11 +116,11 @@ const CJK_MULTILINGUAL_WORDS = {
 
 export function generateCliScript(config: GeneratorConfig): string {
   const safeQuery = (config.query || 'fix bug').replace(/"/g, '\\"');
-  const toolDir = normalizeToolDir(config.toolDir);
+  const maxHops = config.maxHops || 2;
   return `#!/usr/bin/env node
 /**
- * ctxslice.mjs — Zero-Config Multi-Language Local AST Context Pre-Compiler (v0.2.0)
- * Features: Path Disambiguation, TF-IDF Scarcity Weighting, Omitted Top Matches Summary
+ * ctxslice.mjs — Zero-Config Multi-Language Local AST Context Pre-Compiler (${APP_VERSION})
+ * Features: Multi-Language AST Extractors, State-Machine Brace Matcher, True Call Graph (BFS), TF-IDF, Directory Quota Cap
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -163,6 +168,10 @@ function expandQueryTerms(query) {
 }
 
 const args = process.argv.slice(2);
+if (args.includes('--version') || args.includes('-v')) {
+  process.stdout.write('ctxslice ${APP_VERSION}\\n');
+  process.exit(0);
+}
 const rootFlag = args.indexOf('--root');
 const targetRoot = rootFlag !== -1 && args[rootFlag + 1] ? path.resolve(args[rootFlag + 1]) : process.cwd();
 const budgetFlag = args.indexOf('--budget');
@@ -183,6 +192,7 @@ const BINARY_EXT = new Set([
   '.db', '.sqlite', '.sqlite3', '.mdb', '.psd', '.ai', '.sketch', '.fig', '.xd', '.blend'
 ]);
 const NOISE_FILE = /(^|\\/)(package-lock\\.json|npm-shrinkwrap\\.json|yarn\\.lock|pnpm-lock\\.yaml|Cargo\\.lock|poetry\\.lock|Gemfile\\.lock|composer\\.lock|go\\.sum|Podfile\\.lock|packages\\.lock\\.json|\\.env(\\..*)?|\\.pem|\\.key|credentials\\.json|service-account.*\\.json|secrets\\.json)$|\\.min\\.(js|mjs|cjs|css)$|\\.map$/i;
+const CONTROL_WORDS = new Set(['if', 'else', 'for', 'while', 'switch', 'catch', 'return', 'sizeof', 'typeof', 'do', 'try']);
 
 function isTextCandidate(full) {
   if (BINARY_EXT.has(path.extname(full).toLowerCase())) return false;
@@ -216,79 +226,264 @@ function estimateTokens(str) {
   return Math.max(1, Math.round(str.length / 3.8));
 }
 
-function skeletonizeCode(code, ext) {
-  const e = ext.toLowerCase();
-  if (e === '.py' || e === '.pyw') {
-    return code.replace(
-      /^((?:async\\s+)?def\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\([^)]*\\)[^:]*:)\\n(?:[ \\t]+.*\\n?)+/gm,
-      (_, sig) => \`\${sig}\\n    # ... body folded\\n\`
-    );
+function maskCommentsAndStrings(code) {
+  return code
+    .replace(/\\/\\*[\\s\\S]*?\\*\\//g, (m) => m.replace(/[^\\n]/g, ' '))
+    .replace(/\\/\\/.*$/gm, (m) => ' '.repeat(m.length))
+    .replace(/#.*$/gm, (m) => ' '.repeat(m.length))
+    .replace(/\`(?:\\\\[\\s\\S]|[^\`\\\\])*\`/g, (m) => m.replace(/[^\\n]/g, ' '))
+    .replace(/"(?:\\\\.|[^"\\\\])*"/g, (m) => ' '.repeat(m.length))
+    .replace(/'(?:\\\\.|[^'\\\\])*'/g, (m) => ' '.repeat(m.length));
+}
+
+function findBraceEnd(lines, startIdx) {
+  const maskedLines = maskCommentsAndStrings(lines.slice(startIdx).join('\\n')).split('\\n');
+  let depth = 0, opened = false, endRel = 0;
+  for (let j = 0; j < maskedLines.length; j++) {
+    const line = maskedLines[j];
+    for (let k = 0; k < line.length; k++) {
+      const ch = line[k];
+      if (ch === '{') { depth++; opened = true; }
+      else if (ch === '}') depth--;
+    }
+    endRel = j;
+    if (opened && depth <= 0) break;
+    if (!opened && line.trim().endsWith(';')) break;
   }
-  if (e === '.go') {
-    return code.replace(
-      /^(func[ \\t]+(?:\\([^)]+\\)[ \\t]+)?[A-Za-z_][A-Za-z0-9_]*[ \\t]*\\([^)]*\\)[^{\\n]*)\\{[\\s\\S]*?^\\}/gm,
-      (_, sig) => \`\${sig.trim()} { /* ... body folded ... */ }\`
-    );
-  }
-  const folded = code.replace(
-    /^((?:export\\s+|public\\s+|private\\s+|protected\\s+|internal\\s+|static\\s+|async\\s+|pub\\s+)*(?:function|func|fn|def)\\s+[A-Za-z0-9_$:]+\\s*\\([^)]*\\)[^{\\n]*)\\{[\\s\\S]*?^\\}/gm,
-    (_, sig) => \`\${sig.trim()} { /* ... body folded ... */ }\`
-  );
-  if (estimateTokens(folded) >= estimateTokens(code) * 0.9) {
-    const lines = code.split('\\n');
-    if (lines.length > 24) {
-      return lines.slice(0, 20).join('\\n') + \`\\n/* ... \${lines.length - 20} lines folded ... */\`;
+  return startIdx + endRel;
+}
+
+function extractBlocks(code, ext, fileName) {
+  const e = (ext || '').toLowerCase();
+  const lines = code.split('\\n');
+  const blocks = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('/*')) continue;
+
+    let name = null;
+    let kind = 'function';
+    let m = null;
+
+    if (e === '.py' || e === '.pyw') {
+      m = line.match(/^(?:async\\s+)?(def|class)\\s+([A-Za-z_][A-Za-z0-9_]*)/);
+      if (m) {
+        name = m[2];
+        kind = m[1] === 'class' ? 'class' : 'function';
+        let end = i;
+        for (let j = i + 1; j < lines.length; j++) {
+          if (lines[j].trim() === '' || /^\\s+/.test(lines[j])) end = j;
+          else break;
+        }
+        while (end > i && lines[end].trim() === '') end--;
+        const full = lines.slice(i, end + 1).join('\\n');
+        const skeleton = end - i > 2 ? \`\${lines[i]}\\n    # ... \${end - i} lines folded\` : full;
+        blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+        i = end;
+        continue;
+      }
+    }
+
+    if (e === '.go') {
+      m = line.match(/^func\\s+(?:\\([^)]+\\)\\s+)?([A-Za-z0-9_]+)/);
+      if (m) {
+        name = m[1];
+        kind = 'function';
+        const end = findBraceEnd(lines, i);
+        const full = lines.slice(i, end + 1).join('\\n');
+        const sigIdx = full.indexOf('{');
+        const skeleton = (sigIdx === -1 || end - i < 3) ? full : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
+        blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+        i = end;
+        continue;
+      }
+    }
+
+    if (e === '.rs') {
+      m = line.match(/^(?:pub(?:\\([^)]+\\))?\\s+)?(?:async\\s+)?(fn|struct|enum|impl|trait)\\s+([A-Za-z0-9_]+)/);
+      if (m) {
+        kind = m[1];
+        name = m[2];
+        const end = findBraceEnd(lines, i);
+        const full = lines.slice(i, end + 1).join('\\n');
+        const sigIdx = full.indexOf('{');
+        const skeleton = (sigIdx === -1 || end - i < 3) ? full : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
+        blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+        if (kind !== 'impl') i = end;
+        continue;
+      }
+    }
+
+    if (e === '.java' || e === '.kt' || e === '.kts' || e === '.cs') {
+      m = line.match(/^(?:\\s)*(?:public|private|protected|internal|static|final|async|override|abstract|default|native|synchronized|\\s)+[\\w<>\\[\\],\\s]+\\s+([A-Za-z0-9_]+)\\s*\\(/);
+      if (!m) {
+        m = line.match(/^(?:\\s)*(?:public|private|protected|internal|static|final|abstract|\\s)*(class|interface|record|enum|struct)\\s+([A-Za-z0-9_]+)/);
+        if (m) { kind = m[1]; name = m[2]; }
+      } else {
+        name = m[1]; kind = 'method';
+      }
+      if (name) {
+        const end = findBraceEnd(lines, i);
+        const full = lines.slice(i, end + 1).join('\\n');
+        const sigIdx = full.indexOf('{');
+        const skeleton = (sigIdx === -1 || end - i < 3) ? full : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
+        blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+        if (kind !== 'class') i = end;
+        continue;
+      }
+    }
+
+    if (e === '.c' || e === '.h' || e === '.cpp' || e === '.hpp' || e === '.cc' || e === '.cxx') {
+      m = line.match(/^(?:class|struct|enum)\\s+([A-Za-z0-9_]+)/);
+      if (m) {
+        kind = 'class'; name = m[1];
+      } else {
+        m = line.match(/^(?:(?:inline|static|virtual|explicit|constexpr|friend)\\s+)*[\\w:*&<>\\[\\]\\s]+\\s+([A-Za-z0-9_]+)\\s*\\([^;)]*\\)\\s*(?:const)?\\s*(?:noexcept)?\\s*\\{?/);
+        if (m && !line.includes('return ') && !line.includes('typedef ')) { name = m[1]; kind = 'function'; }
+      }
+      if (name) {
+        const end = findBraceEnd(lines, i);
+        const full = lines.slice(i, end + 1).join('\\n');
+        const sigIdx = full.indexOf('{');
+        const skeleton = (sigIdx === -1 || end - i < 3) ? full : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
+        blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+        if (kind !== 'class' && kind !== 'struct') i = end;
+        continue;
+      }
+    }
+
+    m = line.match(/^(?:export\\s+(?:default\\s+)?)?(?:async\\s+)?(function|class|interface|type|enum|const)\\s+([A-Za-z0-9_$]+)/);
+    if (!m) {
+      m = line.match(/^(?:(?:public|protected|private|static|final|abstract)\\s+)*(?:function|func)\\s+([A-Za-z0-9_$]+)/);
+      if (m) { name = m[1]; kind = 'function'; }
+    } else {
+      name = m[2]; kind = m[1];
+    }
+
+    if (name) {
+      const end = findBraceEnd(lines, i);
+      const full = lines.slice(i, end + 1).join('\\n');
+      const sigIdx = full.indexOf('{');
+      const skeleton = (kind === 'interface' || kind === 'type' || sigIdx === -1 || end - i < 4)
+        ? full
+        : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
+      blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+      if (kind !== 'class' && kind !== 'module') i = end;
     }
   }
-  return folded;
+
+  if (blocks.length === 0 && lines.length > 0) {
+    const name = path.basename(fileName || ('file' + e));
+    const full = code;
+    const skeleton = lines.length > 25 ? lines.slice(0, 20).join('\\n') + \`\\n/* ... \${lines.length - 20} lines folded ... */\` : full;
+    blocks.push({ name, kind: 'module', startLine: 1, endLine: lines.length, full, skeleton });
+  }
+  return blocks;
 }
 
 const files = walk(targetRoot);
 const terms = expandQueryTerms(query);
-const fileContents = new Map();
+const allRawBlocks = [];
 for (const filePath of files) {
   try {
     const buf = fs.readFileSync(filePath);
     if (isBinaryBuffer(buf)) continue;
-    fileContents.set(filePath, buf.toString('utf8'));
+    const content = buf.toString('utf8');
+    const relPath = path.relative(targetRoot, filePath);
+    const items = extractBlocks(content, path.extname(filePath), relPath);
+    for (const b of items) {
+      allRawBlocks.push({
+        ...b,
+        filePath: relPath,
+        rawTokens: estimateTokens(b.full),
+        skelTokens: estimateTokens(b.skeleton),
+      });
+    }
   } catch {}
 }
 
-const validFiles = Array.from(fileContents.keys());
-const totalFiles = Math.max(1, validFiles.length);
+const totalBlocks = Math.max(1, allRawBlocks.length);
 const termDF = {};
 for (const t of terms) {
   let df = 0;
-  for (const [filePath, content] of fileContents.entries()) {
-    if (content.toLowerCase().includes(t) || filePath.toLowerCase().includes(t)) {
+  for (const b of allRawBlocks) {
+    if (b.name.toLowerCase().includes(t) || b.filePath.toLowerCase().includes(t) || b.full.toLowerCase().includes(t)) {
       df++;
     }
   }
   termDF[t] = Math.max(1, df);
 }
 
-const scored = validFiles.map((filePath) => {
-  const relPath = path.relative(targetRoot, filePath);
-  const content = fileContents.get(filePath);
-  const lower = content.toLowerCase();
-  const relLower = relPath.toLowerCase();
+const scored = allRawBlocks.map((b) => {
+  const lower = b.full.toLowerCase();
+  const relLower = b.filePath.toLowerCase();
   let score = 0;
   for (const t of terms) {
     const df = termDF[t] || 1;
-    const idf = Math.log(1 + (totalFiles / df));
-    const scarcityMultiplier = (df / totalFiles > 0.3) ? 0.35 : (df / totalFiles > 0.15) ? 0.7 : 1.25;
-    // Path Disambiguation: extra boost if directory path hierarchy matches query terms (e.g. backend/ vs frontend/)
+    const idf = Math.log(1 + (totalBlocks / df));
+    const scarcityMultiplier = (df / totalBlocks > 0.3) ? 0.35 : (df / totalBlocks > 0.15) ? 0.7 : 1.25;
+    const nameMatch = b.name.toLowerCase().includes(t) ? 35 : 0;
     const pathMatch = relLower.includes(t) ? 25 : 0;
     const bodyOcc = lower.split(t).length - 1;
     const bodyScore = Math.min(15, 3 * Math.log1p(bodyOcc));
-    score += (pathMatch + bodyScore) * idf * scarcityMultiplier;
+    score += (nameMatch + pathMatch + bodyScore) * idf * scarcityMultiplier;
   }
-  return { filePath: relPath, ext: path.extname(filePath), content, score, tokens: estimateTokens(content) };
-}).filter(Boolean).sort((a, b) => b.score - a.score);
+  return { ...b, score };
+}).sort((a, b) => b.score - a.score);
+
+// True Call Graph (SymbolMap + Word-Boundary Call Matching + BFS maxHops)
+const symbolMap = new Map();
+for (let i = 0; i < scored.length; i++) {
+  const b = scored[i];
+  if (b.name && b.kind !== 'module' && !CONTROL_WORDS.has(b.name)) {
+    if (!symbolMap.has(b.name)) symbolMap.set(b.name, []);
+    symbolMap.get(b.name).push(i);
+  }
+}
+const callAdj = Array.from({ length: scored.length }, () => new Set());
+const definedNames = Array.from(symbolMap.keys());
+for (let i = 0; i < scored.length; i++) {
+  const caller = scored[i];
+  const maskedCaller = maskCommentsAndStrings(caller.full);
+  for (const sym of definedNames) {
+    if (sym === caller.name) continue;
+    if (maskedCaller.includes(sym)) {
+      const esc = sym.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+      if (new RegExp('\\\\b' + esc + '\\\\s*\\\\(', 'm').test(maskedCaller)) {
+        for (const t of (symbolMap.get(sym) || [])) {
+          callAdj[i].add(t);
+          callAdj[t].add(i);
+        }
+      }
+    }
+  }
+}
+const hopDistances = new Map();
+const bfsQ = [];
+for (let i = 0; i < scored.length; i++) {
+  if (scored[i].score > 0 && bfsQ.length < 3) {
+    bfsQ.push(i);
+    hopDistances.set(i, 0);
+  }
+}
+let qHead = 0;
+while (qHead < bfsQ.length) {
+  const curr = bfsQ[qHead++];
+  const curHop = hopDistances.get(curr) ?? 0;
+  if (curHop >= ${maxHops}) continue;
+  for (const nbr of callAdj[curr]) {
+    if (!hopDistances.has(nbr)) {
+      hopDistances.set(nbr, curHop + 1);
+      bfsQ.push(nbr);
+    }
+  }
+}
 
 let remaining = budget;
-const out = ['<context_slice root="' + path.basename(targetRoot) + '" budget="' + budget + '">'];
-const includedPaths = new Set();
+const out = ['<context_slice root="' + path.basename(targetRoot) + '" version="${SCRIPT_VERSION}" budget="' + budget + '">'];
+const includedIds = new Set();
 const dirBudgetUsed = {};
 const maxDirBudget = budget * 0.65;
 
@@ -297,34 +492,37 @@ for (let i = 0; i < scored.length; i++) {
   const item = scored[i];
   const topDir = item.filePath.split(path.sep)[0] || 'root';
   const curDir = dirBudgetUsed[topDir] || 0;
+  const hop = hopDistances.get(i);
+  const isFocal = hop === 0 || (i < 2 && item.score > 0);
+  const key = item.filePath + ':' + item.startLine;
 
-  if (i < 2 && item.tokens <= remaining && curDir + item.tokens <= maxDirBudget) {
-    remaining -= item.tokens;
-    dirBudgetUsed[topDir] = curDir + item.tokens;
-    includedPaths.add(item.filePath);
-    out.push(\`  <!-- FULL: \${item.filePath} (\${item.tokens} tokens) -->\`);
-    out.push(item.content);
-  } else {
-    const skel = skeletonizeCode(item.content, item.ext);
-    const skelTokens = estimateTokens(skel);
-    if (skelTokens <= remaining && curDir + skelTokens <= maxDirBudget) {
-      remaining -= skelTokens;
-      dirBudgetUsed[topDir] = curDir + skelTokens;
-      includedPaths.add(item.filePath);
-      out.push(\`  <!-- SKELETON: \${item.filePath} (\${skelTokens} tokens) -->\`);
-      out.push(skel);
+  if (isFocal && item.rawTokens <= remaining && curDir + item.rawTokens <= maxDirBudget) {
+    remaining -= item.rawTokens;
+    dirBudgetUsed[topDir] = curDir + item.rawTokens;
+    includedIds.add(key);
+    out.push(\`  <!-- FULL: \${item.filePath}:\${item.startLine}-\${item.endLine} (\${item.rawTokens} tokens) -->\`);
+    out.push(item.full);
+  } else if (item.skelTokens <= remaining && curDir + item.skelTokens <= maxDirBudget) {
+    const linked = (hop !== undefined && hop <= ${maxHops}) || item.score > 0;
+    if (linked || i < 12) {
+      remaining -= item.skelTokens;
+      dirBudgetUsed[topDir] = curDir + item.skelTokens;
+      includedIds.add(key);
+      out.push(\`  <!-- SKELETON: \${item.filePath}:\${item.startLine}-\${item.endLine} (\${item.skelTokens} tokens) -->\`);
+      out.push(item.skeleton);
     } else {
       candidateItems.push(item);
     }
+  } else {
+    candidateItems.push(item);
   }
 }
 
-// Omitted Top Matches Summary (top 3 high relevance items omitted due to budget/diversity cap)
-const omitted = candidateItems.filter(item => item.score > 0 && !includedPaths.has(item.filePath)).slice(0, 3);
+const omitted = candidateItems.filter(item => item.score > 0 && !includedIds.has(item.filePath + ':' + item.startLine)).slice(0, 3);
 if (omitted.length > 0) {
   out.push('<omitted_top_matches>');
   for (const o of omitted) {
-    out.push(\`  <!-- Omitted: \${o.filePath} (score: \${o.score.toFixed(1)}) — consider expanding -->\`);
+    out.push(\`  <!-- Omitted: \${o.filePath}:\${o.startLine} (\${o.name}, score: \${o.score.toFixed(1)}) — consider expanding -->\`);
   }
   out.push('</omitted_top_matches>');
 }
@@ -367,14 +565,23 @@ export function generateThinMcpServer(config: GeneratorConfig): {
 } {
   const toolDir = normalizeToolDir(config.toolDir);
   const mcpPath = `${toolDir}/ctxslice-mcp.mjs`;
+  const maxHops = config.maxHops || 2;
   const serverCode = `#!/usr/bin/env node
 /**
- * ctxslice-mcp.mjs — Global Multi-Language MCP Server v0.2.0
- * Features: Path Disambiguation, TF-IDF Scarcity Weighting, subPath Sandbox, In-Memory mtime Cache, Omitted Summary
+ * ctxslice-mcp.mjs — Global Multi-Language MCP Server ${APP_VERSION}
+ * Features: Embedded Base64 Tree-sitter WASM + Lazy Cache (~/.contextslice/parsers),
+ *           State-Machine Brace Matcher Fallback, True Call Graph (BFS), TF-IDF, subPath Sandbox, mtime Cache
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { createRequire } from 'node:module';
+
+if (process.argv.includes('--version') || process.argv.includes('-v')) {
+  process.stdout.write('ctxslice-mcp ${APP_VERSION}\\n');
+  process.exit(0);
+}
 
 const CJK_RE = /[一-鿿぀-ゟ゠-ヿ가-힯]/;
 const CJK_RUN_RE = new RegExp('[一-鿿぀-ゟ゠-ヿ가-힯]+', 'g');
@@ -420,7 +627,7 @@ function expandQueryTerms(query) {
 
 const TOOL_DEF = {
   name: 'get_context_slice',
-  description: 'PRIMARY code-reading tool with path disambiguation, TF-IDF scarcity weighting & omitted summary.',
+  description: 'PRIMARY code-reading tool (${APP_VERSION}) with Tree-sitter WASM / State-Machine AST parsing, True Call Graph, TF-IDF & omitted summary.',
   annotations: { readOnlyHint: true },
   inputSchema: {
     type: 'object',
@@ -460,7 +667,7 @@ const BINARY_EXT_RE = /\\.(png|jpe?g|gif|webp|bmp|ico|icns|tiff?|svg|mp4|mov|avi
 const NOISE_FILE_RE = /(^|\\/)(package-lock\\.json|npm-shrinkwrap\\.json|yarn\\.lock|pnpm-lock\\.yaml|Cargo\\.lock|poetry\\.lock|Gemfile\\.lock|composer\\.lock|go\\.sum|Podfile\\.lock|packages\\.lock\\.json|\\.env(\\..*)?|\\.pem|\\.key|credentials\\.json|service-account.*\\.json|secrets\\.json)$|\\.min\\.(js|mjs|cjs|css)$|\\.map$/i;
 const CONTROL_WORDS = new Set(['if', 'else', 'for', 'while', 'switch', 'catch', 'return', 'sizeof', 'typeof', 'do', 'try']);
 
-// Pure in-memory mtime cache: Map<filePath, { mtime: number, items: Array<...> }>
+// Pure in-memory mtime cache: Map<filePath, { mtime: number, parserMode: string, items: Array<...> }>
 const FILE_CACHE = new Map();
 
 function isAcceptedFile(name) {
@@ -480,27 +687,226 @@ function isBinaryBuffer(buf) {
   return suspicious / len > 0.08;
 }
 
+// Embedded web-tree-sitter@0.22.6 runtime + core WASM (Base64) for zero-install execution
+const TREE_SITTER_JS_B64 = '${TREE_SITTER_JS_B64}';
+const TREE_SITTER_WASM_B64 = '${TREE_SITTER_WASM_B64}';
+const WASM_PARSER_DIR = path.join(os.homedir(), '.contextslice', 'parsers');
+
+const EXT_TO_TS_LANG = {
+  '.rs': 'rust',
+  '.go': 'go',
+  '.py': 'python',
+  '.pyw': 'python',
+  '.js': 'javascript',
+  '.jsx': 'javascript',
+  '.mjs': 'javascript',
+  '.cjs': 'javascript',
+  '.ts': 'typescript',
+  '.mts': 'typescript',
+  '.cts': 'typescript',
+  '.tsx': 'tsx',
+  '.java': 'java',
+  '.cs': 'c_sharp',
+  '.c': 'cpp',
+  '.h': 'cpp',
+  '.cpp': 'cpp',
+  '.hpp': 'cpp',
+  '.cc': 'cpp',
+  '.cxx': 'cpp',
+};
+
+const WASM_GRAMMAR_URLS = {
+  rust: 'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.13/out/tree-sitter-rust.wasm',
+  go: 'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.13/out/tree-sitter-go.wasm',
+  python: 'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.13/out/tree-sitter-python.wasm',
+  javascript: 'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.13/out/tree-sitter-javascript.wasm',
+  typescript: 'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.13/out/tree-sitter-typescript.wasm',
+  tsx: 'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.13/out/tree-sitter-tsx.wasm',
+  cpp: 'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.13/out/tree-sitter-cpp.wasm',
+  java: 'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.13/out/tree-sitter-java.wasm',
+  c_sharp: 'https://cdn.jsdelivr.net/npm/tree-sitter-wasms@0.1.13/out/tree-sitter-c_sharp.wasm',
+};
+
+const TREE_SITTER_QUERIES = {
+  rust: '(function_item name: (identifier) @name) @body (struct_item name: (type_identifier) @name) @body (enum_item name: (type_identifier) @name) @body (trait_item name: (type_identifier) @name) @body (impl_item type: (type_identifier) @name) @body',
+  go: '(function_declaration name: (identifier) @name) @body (method_declaration name: (field_identifier) @name) @body',
+  python: '(function_definition name: (identifier) @name) @body (class_definition name: (identifier) @name) @body',
+  javascript: '(function_declaration name: (identifier) @name) @body (class_declaration name: (identifier) @name) @body (method_definition name: (property_identifier) @name) @body',
+  typescript: '(function_declaration name: (identifier) @name) @body (class_declaration name: (type_identifier) @name) @body (interface_declaration name: (type_identifier) @name) @body (method_definition name: (property_identifier) @name) @body',
+  tsx: '(function_declaration name: (identifier) @name) @body (class_declaration name: (type_identifier) @name) @body (interface_declaration name: (type_identifier) @name) @body (method_definition name: (property_identifier) @name) @body',
+  java: '(method_declaration name: (identifier) @name) @body (class_declaration name: (identifier) @name) @body (interface_declaration name: (identifier) @name) @body',
+  c_sharp: '(method_declaration name: (identifier) @name) @body (class_declaration name: (identifier) @name) @body (interface_declaration name: (identifier) @name) @body',
+  cpp: '(function_definition declarator: (function_declarator declarator: (_) @name)) @body (class_specifier name: (type_identifier) @name) @body (struct_specifier name: (type_identifier) @name) @body',
+};
+
+let tsParserClassPromise = null;
+const LANG_CACHE = new Map();
+
+async function getTreeSitterParserClass() {
+  if (!tsParserClassPromise) {
+    tsParserClassPromise = (async () => {
+      try {
+        const jsCode = Buffer.from(TREE_SITTER_JS_B64, 'base64').toString('utf8');
+        const mod = { exports: {} };
+        const req = createRequire(import.meta.url);
+        const loader = new Function('exports', 'require', 'module', '__filename', '__dirname', jsCode);
+        loader(mod.exports, req, mod, 'tree-sitter.js', '.');
+        const Parser = mod.exports;
+        const wasmBytes = Buffer.from(TREE_SITTER_WASM_B64, 'base64');
+        await Parser.init({ wasmBinary: wasmBytes });
+        return Parser;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return tsParserClassPromise;
+}
+
+async function loadLanguageWasm(langName) {
+  if (!langName || !WASM_GRAMMAR_URLS[langName]) return null;
+  if (LANG_CACHE.has(langName)) return LANG_CACHE.get(langName);
+  try {
+    const Parser = await getTreeSitterParserClass();
+    if (!Parser) { LANG_CACHE.set(langName, null); return null; }
+
+    const cacheFile = path.join(WASM_PARSER_DIR, \`tree-sitter-\${langName}.wasm\`);
+    let wasmBytes = null;
+    if (fs.existsSync(cacheFile)) {
+      wasmBytes = fs.readFileSync(cacheFile);
+    } else if (process.env.CTXSLICE_DISABLE_WASM_FETCH !== '1') {
+      const res = await fetch(WASM_GRAMMAR_URLS[langName], { signal: AbortSignal.timeout(5000) });
+      if (res.ok) {
+        wasmBytes = Buffer.from(await res.arrayBuffer());
+        try {
+          fs.mkdirSync(WASM_PARSER_DIR, { recursive: true });
+          fs.writeFileSync(cacheFile, wasmBytes);
+        } catch {}
+      }
+    }
+    if (!wasmBytes) {
+      LANG_CACHE.set(langName, null);
+      return null;
+    }
+    const language = await Parser.Language.load(new Uint8Array(wasmBytes));
+    LANG_CACHE.set(langName, language);
+    return language;
+  } catch {
+    LANG_CACHE.set(langName, null);
+    return null;
+  }
+}
+
+async function extractBlocksWithTreeSitter(code, ext, fileName) {
+  const e = (ext || '').toLowerCase();
+  const langName = EXT_TO_TS_LANG[e];
+  const querySrc = langName ? TREE_SITTER_QUERIES[langName] : null;
+  if (!langName || !querySrc) return null;
+
+  const Parser = await getTreeSitterParserClass();
+  const language = await loadLanguageWasm(langName);
+  if (!Parser || !language) return null;
+
+  let parser = null;
+  let tree = null;
+  let query = null;
+  try {
+    parser = new Parser();
+    parser.setLanguage(language);
+    tree = parser.parse(code);
+    query = language.query(querySrc);
+    const matches = query.matches(tree.rootNode);
+    if (!matches || matches.length === 0) return null;
+
+    const lines = code.split('\\n');
+    const seen = new Set();
+    const blocks = [];
+
+    for (const m of matches) {
+      const bodyCap = m.captures.find((c) => c.name === 'body');
+      const nameCap = m.captures.find((c) => c.name === 'name');
+      if (!bodyCap || !nameCap) continue;
+      const startLine = bodyCap.node.startPosition.row + 1;
+      const endLine = bodyCap.node.endPosition.row + 1;
+      const name = String(nameCap.node.text || '').trim();
+      const key = name + '@' + startLine + '-' + endLine;
+      if (!name || seen.has(key)) continue;
+      seen.add(key);
+
+      const nodeType = bodyCap.node.type || 'function';
+      const kind = nodeType.includes('class') ? 'class'
+        : nodeType.includes('interface') ? 'interface'
+        : nodeType.includes('struct') ? 'struct'
+        : nodeType.includes('impl') ? 'impl'
+        : nodeType.includes('method') ? 'method'
+        : 'function';
+
+      const full = lines.slice(startLine - 1, endLine).join('\\n');
+      let skeleton = full;
+      if (endLine - startLine >= 3) {
+        if (langName === 'python') {
+          skeleton = \`\${lines[startLine - 1]}\\n    # ... \${endLine - startLine} lines folded\`;
+        } else {
+          const sigIdx = full.indexOf('{');
+          if (sigIdx !== -1 && kind !== 'interface') {
+            skeleton = full.slice(0, sigIdx).trim() + \` { /* ... \${endLine - startLine - 1} lines folded */ }\`;
+          }
+        }
+      }
+      blocks.push({ name, kind, startLine, endLine, full, skeleton });
+    }
+
+    if (blocks.length === 0) return null;
+    blocks.sort((a, b) => a.startLine - b.startLine);
+    return blocks;
+  } catch {
+    return null;
+  } finally {
+    if (query) try { query.delete(); } catch {}
+    if (tree) try { tree.delete(); } catch {}
+    if (parser) try { parser.delete(); } catch {}
+  }
+}
+
+function maskCommentsAndStrings(code) {
+  return code
+    .replace(/\\/\\*[\\s\\S]*?\\*\\//g, (m) => m.replace(/[^\\n]/g, ' '))
+    .replace(/\\/\\/.*$/gm, (m) => ' '.repeat(m.length))
+    .replace(/#.*$/gm, (m) => ' '.repeat(m.length))
+    .replace(/\`(?:\\\\[\\s\\S]|[^\`\\\\])*\`/g, (m) => m.replace(/[^\\n]/g, ' '))
+    .replace(/"(?:\\\\.|[^"\\\\])*"/g, (m) => ' '.repeat(m.length))
+    .replace(/'(?:\\\\.|[^'\\\\])*'/g, (m) => ' '.repeat(m.length));
+}
+
+// 狀態機括號匹配器：計算括號深度前先以遮罩演算法屏蔽單行註解、多行註解與字串字面量（保留換行符號）
 function findBraceEnd(lines, startIdx) {
-  let depth = 0, opened = false, end = startIdx;
-  for (let j = startIdx; j < lines.length; j++) {
-    for (const ch of lines[j]) {
+  const maskedLines = maskCommentsAndStrings(lines.slice(startIdx).join('\\n')).split('\\n');
+  let depth = 0, opened = false, endRel = 0;
+  for (let j = 0; j < maskedLines.length; j++) {
+    const line = maskedLines[j];
+    for (let k = 0; k < line.length; k++) {
+      const ch = line[k];
       if (ch === '{') { depth++; opened = true; }
       else if (ch === '}') depth--;
     }
-    end = j;
+    endRel = j;
     if (opened && depth <= 0) break;
-    if (!opened && lines[j].trim().endsWith(';')) break;
+    if (!opened && line.trim().endsWith(';')) break;
   }
-  return end;
+  return startIdx + endRel;
 }
 
-function extractBlocks(code, ext) {
+// 支援 Go, Rust, Java, Kotlin, C#, C++, Python, TS/JS 之多語言區塊提取器 (Offline Fallback)
+function extractBlocks(code, ext, fileName) {
   const e = (ext || '').toLowerCase();
   const lines = code.split('\\n');
   const blocks = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('/*')) continue;
+
     let name = null;
     let kind = 'function';
     let m = null;
@@ -524,10 +930,103 @@ function extractBlocks(code, ext) {
       }
     }
 
+    if (e === '.go') {
+      m = line.match(/^func\\s+(?:\\([^)]+\\)\\s+)?([A-Za-z0-9_]+)/);
+      if (m) {
+        name = m[1];
+        kind = 'function';
+        const end = findBraceEnd(lines, i);
+        const full = lines.slice(i, end + 1).join('\\n');
+        const sigIdx = full.indexOf('{');
+        const skeleton = (sigIdx === -1 || end - i < 3)
+          ? full
+          : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
+        blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+        i = end;
+        continue;
+      }
+    }
+
+    if (e === '.rs') {
+      m = line.match(/^(?:pub(?:\\([^)]+\\))?\\s+)?(?:async\\s+)?(fn|struct|enum|impl|trait)\\s+([A-Za-z0-9_]+)/);
+      if (m) {
+        kind = m[1];
+        name = m[2];
+        const end = findBraceEnd(lines, i);
+        const full = lines.slice(i, end + 1).join('\\n');
+        const sigIdx = full.indexOf('{');
+        const skeleton = (sigIdx === -1 || end - i < 3)
+          ? full
+          : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
+        blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+        if (kind !== 'impl') i = end;
+        continue;
+      }
+    }
+
+    if (e === '.java' || e === '.kt' || e === '.kts' || e === '.cs') {
+      m = line.match(/^(?:\\s)*(?:public|private|protected|internal|static|final|async|override|abstract|default|native|synchronized|\\s)+[\\w<>\\[\\],\\s]+\\s+([A-Za-z0-9_]+)\\s*\\(/);
+      if (!m) {
+        m = line.match(/^(?:\\s)*(?:public|private|protected|internal|static|final|abstract|\\s)*(class|interface|record|enum|struct)\\s+([A-Za-z0-9_]+)/);
+        if (m) {
+          kind = m[1];
+          name = m[2];
+        }
+      } else {
+        name = m[1];
+        kind = 'method';
+      }
+      if (name) {
+        const end = findBraceEnd(lines, i);
+        const full = lines.slice(i, end + 1).join('\\n');
+        const sigIdx = full.indexOf('{');
+        const skeleton = (sigIdx === -1 || end - i < 3)
+          ? full
+          : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
+        blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+        if (kind !== 'class') i = end;
+        continue;
+      }
+    }
+
+    if (e === '.c' || e === '.h' || e === '.cpp' || e === '.hpp' || e === '.cc' || e === '.cxx') {
+      m = line.match(/^(?:class|struct|enum)\\s+([A-Za-z0-9_]+)/);
+      if (m) {
+        kind = 'class';
+        name = m[1];
+      } else {
+        m = line.match(/^(?:(?:inline|static|virtual|explicit|constexpr|friend)\\s+)*[\\w:*&<>\\[\\]\\s]+\\s+([A-Za-z0-9_]+)\\s*\\([^;)]*\\)\\s*(?:const)?\\s*(?:noexcept)?\\s*\\{?/);
+        if (m && !line.includes('return ') && !line.includes('typedef ')) {
+          name = m[1];
+          kind = 'function';
+        }
+      }
+      if (name) {
+        const end = findBraceEnd(lines, i);
+        const full = lines.slice(i, end + 1).join('\\n');
+        const sigIdx = full.indexOf('{');
+        const skeleton = (sigIdx === -1 || end - i < 3)
+          ? full
+          : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
+        blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+        if (kind !== 'class' && kind !== 'struct') i = end;
+        continue;
+      }
+    }
+
     m = line.match(/^(?:export\\s+(?:default\\s+)?)?(?:async\\s+)?(function|class|interface|type|enum|const)\\s+([A-Za-z0-9_$]+)/);
-    if (m) {
+    if (!m) {
+      m = line.match(/^(?:(?:public|protected|private|static|final|abstract)\\s+)*(?:function|func)\\s+([A-Za-z0-9_$]+)/);
+      if (m) {
+        name = m[1];
+        kind = 'function';
+      }
+    } else {
       name = m[2];
       kind = m[1];
+    }
+
+    if (name) {
       const end = findBraceEnd(lines, i);
       const full = lines.slice(i, end + 1).join('\\n');
       const sigIdx = full.indexOf('{');
@@ -538,10 +1037,20 @@ function extractBlocks(code, ext) {
       if (kind !== 'class' && kind !== 'module') i = end;
     }
   }
+
+  if (blocks.length === 0 && lines.length > 0) {
+    const name = path.basename(fileName || ('file' + e));
+    const full = code;
+    const skeleton = lines.length > 25
+      ? lines.slice(0, 20).join('\\n') + \`\\n/* ... \${lines.length - 20} lines folded ... */\`
+      : full;
+    blocks.push({ name, kind: 'module', startLine: 1, endLine: lines.length, full, skeleton });
+  }
+
   return blocks;
 }
 
-function collectProjectBlocks(root, scanRoot) {
+async function collectProjectBlocks(root, scanRoot) {
   const files = [];
   const walk = (d) => {
     if (!fs.existsSync(d)) return;
@@ -573,21 +1082,31 @@ function collectProjectBlocks(root, scanRoot) {
     const cached = FILE_CACHE.get(f);
 
     let items;
+    let parserMode = 'regex';
     if (cached && cached.mtime === mtime) {
       items = cached.items;
+      parserMode = cached.parserMode || 'regex';
     } else {
       const rawBuf = fs.readFileSync(f);
       if (isBinaryBuffer(rawBuf)) continue;
       const raw = rawBuf.toString('utf8');
-      const blocks = extractBlocks(raw, path.extname(f));
-      items = blocks.length > 0 ? blocks : [{ name: path.basename(rel), kind: 'module', startLine: 1, endLine: raw.split('\\n').length, full: raw, skeleton: raw.slice(0, 400) }];
-      FILE_CACHE.set(f, { mtime, items });
+      const ext = path.extname(f);
+      const tsBlocks = await extractBlocksWithTreeSitter(raw, ext, rel);
+      if (tsBlocks && tsBlocks.length > 0) {
+        items = tsBlocks;
+        parserMode = 'tree-sitter-wasm';
+      } else {
+        items = extractBlocks(raw, ext, rel);
+        parserMode = 'state-machine-regex';
+      }
+      FILE_CACHE.set(f, { mtime, parserMode, items });
     }
 
     for (const b of items) {
       allBlocks.push({
         ...b,
         rel,
+        parserMode,
         lineCount: Math.max(1, b.endLine - b.startLine + 1),
         rawTk: Math.max(1, Math.round(b.full.length / 3.8)),
         skelTk: Math.max(1, Math.round(b.skeleton.length / 3.8))
@@ -614,11 +1133,11 @@ function resolveScanRoot(projectPath, subPath) {
   return { root, scanRoot };
 }
 
-function expandSkeletonCluster(symbols, projectPath, budget = ${config.budgetTokens}, subPath) {
+async function expandSkeletonCluster(symbols, projectPath, budget = ${config.budgetTokens}, subPath) {
   try {
     const { root, scanRoot } = resolveScanRoot(projectPath, subPath);
     const wanted = new Set((symbols || []).map((s) => String(s).toLowerCase()));
-    const blocks = collectProjectBlocks(root, scanRoot);
+    const blocks = await collectProjectBlocks(root, scanRoot);
     let used = 0;
     const expanded = [];
     for (const b of blocks) {
@@ -634,11 +1153,11 @@ function expandSkeletonCluster(symbols, projectPath, budget = ${config.budgetTok
   }
 }
 
-function sliceProject(query, projectPath, budget = ${config.budgetTokens}, autoExpand = true, subPath) {
+async function sliceProject(query, projectPath, budget = ${config.budgetTokens}, autoExpand = true, subPath) {
   try {
     const { root, scanRoot } = resolveScanRoot(projectPath, subPath);
     const terms = expandQueryTerms(String(query));
-    const blocks = collectProjectBlocks(root, scanRoot);
+    const blocks = await collectProjectBlocks(root, scanRoot);
     const totalBlocks = Math.max(1, blocks.length);
     const termDF = {};
     for (const t of terms) {
@@ -660,7 +1179,6 @@ function sliceProject(query, projectPath, budget = ${config.budgetTokens}, autoE
         const idf = Math.log(1 + (totalBlocks / df));
         const scarcityMultiplier = (df / totalBlocks > 0.3) ? 0.35 : (df / totalBlocks > 0.15) ? 0.7 : 1.25;
         const nameMatch = b.name.toLowerCase().includes(t) ? 35 : 0;
-        // Path Disambiguation: extra boost if directory path hierarchy matches query terms (e.g. backend/ vs frontend/)
         const pathMatch = relLower.includes(t) ? 25 : 0;
         const bodyOcc = lower.split(t).length - 1;
         const bodyScore = Math.min(12, 2.5 * Math.log1p(bodyOcc));
@@ -669,6 +1187,60 @@ function sliceProject(query, projectPath, budget = ${config.budgetTokens}, autoE
       return { ...b, score };
     }).sort((a, b) => b.score - a.score);
 
+    // 構建專案 SymbolMap 與基於單字邊界正則 (\\bname\\s*\\() 的真實函式呼叫依賴圖 (True Call Graph)
+    const symbolMap = new Map();
+    for (let idx = 0; idx < allBlocks.length; idx++) {
+      const b = allBlocks[idx];
+      if (b.name && b.kind !== 'module' && !CONTROL_WORDS.has(b.name)) {
+        if (!symbolMap.has(b.name)) symbolMap.set(b.name, []);
+        symbolMap.get(b.name).push(idx);
+      }
+    }
+
+    const callAdj = Array.from({ length: allBlocks.length }, () => new Set());
+    const definedNames = Array.from(symbolMap.keys());
+    for (let i = 0; i < allBlocks.length; i++) {
+      const caller = allBlocks[i];
+      const maskedCaller = maskCommentsAndStrings(caller.full);
+      for (const sym of definedNames) {
+        if (sym === caller.name) continue;
+        if (maskedCaller.includes(sym)) {
+          const esc = sym.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+          const callRe = new RegExp('\\\\b' + esc + '\\\\s*\\\\(', 'm');
+          if (callRe.test(maskedCaller)) {
+            for (const t of (symbolMap.get(sym) || [])) {
+              callAdj[i].add(t);
+              callAdj[t].add(i);
+            }
+          }
+        }
+      }
+    }
+
+    // 計算自頂部修改重點 (Focal) 出發的 1 層 (1-hop) 與 2 層 (2-hop) 關聯距離
+    const focalIndices = [];
+    const hopDistances = new Map();
+    for (let i = 0; i < allBlocks.length; i++) {
+      if (allBlocks[i].score > 0 && focalIndices.length < 3) {
+        focalIndices.push(i);
+        hopDistances.set(i, 0);
+      }
+    }
+
+    const bfsQ = [...focalIndices];
+    let qHead = 0;
+    while (qHead < bfsQ.length) {
+      const curr = bfsQ[qHead++];
+      const curHop = hopDistances.get(curr) ?? 0;
+      if (curHop >= ${maxHops}) continue;
+      for (const nbr of callAdj[curr]) {
+        if (!hopDistances.has(nbr)) {
+          hopDistances.set(nbr, curHop + 1);
+          bfsQ.push(nbr);
+        }
+      }
+    }
+
     let used = 0;
     const fullChunks = [];
     const skelCandidates = [];
@@ -676,27 +1248,28 @@ function sliceProject(query, projectPath, budget = ${config.budgetTokens}, autoE
     const includedIds = new Set();
     const candidateItems = [];
     const dirBudgetUsed = {};
-    const maxDirBudget = budget * 0.65; // Directory quota cap: max 65% per top-level folder
+    const maxDirBudget = budget * 0.65;
 
     for (let i = 0; i < allBlocks.length; i++) {
       const b = allBlocks[i];
       const topDir = b.rel.split(path.sep)[0] || 'root';
       const curDir = dirBudgetUsed[topDir] || 0;
+      const hop = hopDistances.get(i);
+      const isFocal = (hop === 0 || (i < 3 && b.score > 0));
 
-      const isFocal = i < 3 && b.score > 0;
       if (isFocal && used + b.rawTk <= budget && curDir + b.rawTk <= maxDirBudget) {
         used += b.rawTk;
         dirBudgetUsed[topDir] = curDir + b.rawTk;
         focalNames.add(b.name);
-        includedIds.add(b.name + '@' + b.startLine);
-        fullChunks.push(\`// [\${b.rel}:\${b.startLine}-\${b.endLine}]\\n\${b.full}\`);
+        includedIds.add(b.rel + ':' + b.name + '@' + b.startLine);
+        fullChunks.push(\`// [\${b.rel}:\${b.startLine}-\${b.endLine}] [\${b.parserMode}]\\n\${b.full}\`);
       } else if (used + b.skelTk <= budget && curDir + b.skelTk <= maxDirBudget) {
-        const linked = b.score > 0 || [...focalNames].some((fn) => b.full.includes(fn));
+        const linked = (hop !== undefined && hop <= ${maxHops}) || b.score > 0;
         if (linked || i < 12) {
           used += b.skelTk;
           dirBudgetUsed[topDir] = curDir + b.skelTk;
-          skelCandidates.push({ ...b, linked });
-          includedIds.add(b.name + '@' + b.startLine);
+          skelCandidates.push({ ...b, linked, hop: hop ?? null });
+          includedIds.add(b.rel + ':' + b.name + '@' + b.startLine);
         } else {
           candidateItems.push(b);
         }
@@ -719,26 +1292,26 @@ function sliceProject(query, projectPath, budget = ${config.budgetTokens}, autoE
         autoExpandedNames.push(item.name);
         fullChunks.push(\`// [\${item.rel}:\${item.startLine}-\${item.endLine}] [MCP auto-expanded: \${item.lineCount} lines]\\n\${item.full}\`);
       } else {
-        finalSkelChunks.push(\`// [\${item.rel}:\${item.startLine}-\${item.endLine}] (skeleton)\\n\${item.skeleton}\`);
+        const hopNote = item.hop ? \` | \${item.hop}-hop\` : '';
+        finalSkelChunks.push(\`// [\${item.rel}:\${item.startLine}-\${item.endLine}] (skeleton\${hopNote})\\n\${item.skeleton}\`);
       }
     }
 
-    // Collect Omitted Top Matches Summary
-    const omitted = candidateItems.filter(b => b.score > 0 && !includedIds.has(b.name + '@' + b.startLine)).slice(0, 3);
+    const omitted = candidateItems.filter(b => b.score > 0 && !includedIds.has(b.rel + ':' + b.name + '@' + b.startLine)).slice(0, 3);
     const omittedTag = omitted.length > 0
       ? \`\\n<omitted_top_matches>\\n\` + omitted.map(o => \`  <!-- Omitted: \${o.rel}:\${o.startLine} (\${o.name}, score: \${o.score.toFixed(1)}) — consider expanding -->\`).join('\\n') + \`\\n</omitted_top_matches>\`
       : '';
 
     const expandTag = autoExpandedNames.length > 0 ? \` autoExpanded="\${autoExpandedNames.join(',')}"\` : '';
     const subPathTag = subPath ? \` subPath="\${subPath}"\` : '';
-    return \`<context_slice root="\${root}"\${subPathTag} budget="\${budget}" used="\${used}"\${expandTag}>\\n<skeletons>\\n\${finalSkelChunks.join('\\n')}\\n</skeletons>\\n<focal>\\n\${fullChunks.join('\\n\\n')}\\n</focal>\${omittedTag}\\n</context_slice>\`;
+    return \`<context_slice root="\${root}" version="${SCRIPT_VERSION}"\${subPathTag} budget="\${budget}" used="\${used}"\${expandTag}>\\n<skeletons>\\n\${finalSkelChunks.join('\\n')}\\n</skeletons>\\n<focal>\\n\${fullChunks.join('\\n\\n')}\\n</focal>\${omittedTag}\\n</context_slice>\`;
   } catch (err) {
     return \`Error: \${err.message}\`;
   }
 }
 
 const rl = readline.createInterface({ input: process.stdin });
-rl.on('line', (line) => {
+rl.on('line', async (line) => {
   if (!line.trim()) return;
   let req;
   try { req = JSON.parse(line); } catch { return; }
@@ -750,7 +1323,7 @@ rl.on('line', (line) => {
     return send({
       protocolVersion: req.params?.protocolVersion || '2024-11-05',
       capabilities: { tools: {} },
-      serverInfo: { name: 'ctxslice-thin', version: '0.2.0' }
+      serverInfo: { name: 'ctxslice-thin', version: '${SCRIPT_VERSION}' }
     });
   }
   if (req.method === 'ping') return send({});
@@ -758,7 +1331,8 @@ rl.on('line', (line) => {
   if (req.method === 'tools/call' && req.params?.name === 'get_context_slice') {
     try {
       const { query, projectPath, budget, autoExpand, subPath } = req.params.arguments || {};
-      return send({ content: [{ type: 'text', text: sliceProject(query, projectPath, budget, autoExpand !== false, subPath) }] });
+      const text = await sliceProject(query, projectPath, budget, autoExpand !== false, subPath);
+      return send({ content: [{ type: 'text', text }] });
     } catch (err) {
       return send({ isError: true, content: [{ type: 'text', text: String(err?.message || err) }] });
     }
@@ -766,7 +1340,8 @@ rl.on('line', (line) => {
   if (req.method === 'tools/call' && req.params?.name === 'expand_skeleton_cluster') {
     try {
       const { symbols, projectPath, budget, subPath } = req.params.arguments || {};
-      return send({ content: [{ type: 'text', text: expandSkeletonCluster(symbols, projectPath, budget, subPath) }] });
+      const text = await expandSkeletonCluster(symbols, projectPath, budget, subPath);
+      return send({ content: [{ type: 'text', text }] });
     } catch (err) {
       return send({ isError: true, content: [{ type: 'text', text: String(err?.message || err) }] });
     }
