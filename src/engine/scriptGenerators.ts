@@ -591,8 +591,12 @@ function walk(dir, acc = []) {
 }
 
 function estimateTokens(str) {
-  return Math.max(1, Math.round(str.length / 3.8));
+  if (!str) return 0;
+  let cjk = 0;
+  for (let i = 0; i < str.length; i++) if (str.charCodeAt(i) >= 128) cjk++;
+  return Math.max(1, Math.round((str.length - cjk) / 2.1 + cjk * 1.6));
 }
+
 
 function maskCommentsAndStrings(code) {
   return code

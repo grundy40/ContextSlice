@@ -21,21 +21,21 @@ export function estimateTokens(text: string): number {
 
   for (const chunk of chunks) {
     if (/^\s+$/.test(chunk)) {
-      tokens += chunk.includes('\n') ? 0.5 : 0.15;
+      tokens += chunk.includes('\n') ? 1.0 : 0.35;
     } else if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(chunk)) {
       if (chunk.length <= 4) {
         tokens += 1;
       } else {
-        tokens += Math.ceil(chunk.length / 3.8);
+        tokens += Math.ceil(chunk.length / 2.5);
       }
     } else if (/^[0-9]+$/.test(chunk)) {
-      tokens += Math.max(1, Math.ceil(chunk.length / 4));
+      tokens += Math.max(1, Math.ceil(chunk.length / 2.5));
     } else {
       const codePoint = chunk.charCodeAt(0);
       if (codePoint >= 128) {
-        tokens += 1.0; // CJK / unicode
+        tokens += 1.6; // CJK / unicode
       } else {
-        tokens += 0.75; // punctuation
+        tokens += 1.0; // punctuation
       }
     }
   }
