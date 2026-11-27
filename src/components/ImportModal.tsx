@@ -223,9 +223,13 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
                 <input
                   ref={folderInputRef}
                   type="file"
-                  // @ts-expect-error webkitdirectory is supported in Chromium/Firefox/Safari
-                  webkitdirectory=""
-                  directory=""
+                  {...({
+                    webkitdirectory: '',
+                    directory: '',
+                  } as React.InputHTMLAttributes<HTMLInputElement> & {
+                    webkitdirectory?: boolean | string;
+                    directory?: string;
+                  })}
                   multiple
                   className="hidden"
                   onChange={(e) => {
