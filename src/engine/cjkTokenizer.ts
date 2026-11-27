@@ -1,9 +1,8 @@
 /**
- * CJK 2-gram 分詞器 + 中英對照表
- * 零依賴輕量級實作，僅用於軟體開發關鍵詞匹配
+ * CJK Multi-Language (Traditional Chinese, Simplified Chinese, Japanese, Korean) 2-gram Tokenizer & Bilingual Mapping
+ * Zero external dependencies, specifically optimized for software engineering and technical vocabulary matching.
  */
 
-// CJK 2-gram 分詞：採用滑動視窗，優先保留常見詞彙
 export function tokenizeCJK2gram(text: string): string[] {
   const pairMap = getCJKPairMap();
   const results: string[] = [];
@@ -13,7 +12,6 @@ export function tokenizeCJK2gram(text: string): string[] {
     const char = text[i];
     const nextChar = i + 1 < text.length ? text[i + 1] : null;
 
-    // 尝试 2-gram 匹配
     if (nextChar) {
       const bigram = char + nextChar;
       if (pairMap[bigram]) {
@@ -23,199 +21,148 @@ export function tokenizeCJK2gram(text: string): string[] {
       }
     }
 
-    // 回退到單字，檢查是否在對照表
     if (pairMap[char]) {
       results.push(char);
     }
     i += 1;
   }
 
-  // 若無匹配結果，返回原始文本作為備用
   return results.length > 0 ? results : [text];
 }
 
-// 50 組常見軟體開發中英對照表
 const PAIR_MAP: Record<string, string[]> = {
-  // 登入/驗證相關
-  "登": ["login", "auth", "verify", "登録"],
+  // Auth / Login (Traditional, Simplified, Japanese, Korean)
+  "登": ["login", "auth", "verify", "signin"],
   "入": ["login", "enter", "init"],
-  "核": ["auth", "verify", "auth"],
-  "驗": ["auth", "verify"],
-  "證": ["auth"],
+  "登录": ["login", "signin", "auth"],
+  "登入": ["login", "signin", "auth"],
+  "ログイン": ["login", "signin"],
+  "로그인": ["login", "signin"],
+  "认证": ["auth", "verify", "authentication"],
+  "認證": ["auth", "verify", "authentication"],
+  "認証": ["auth", "authentication"],
+  "인증": ["auth", "authentication"],
+  "验证": ["verify", "validate"],
+  "驗證": ["verify", "validate"],
+  "検証": ["verify", "validate"],
+  "검증": ["verify", "validate"],
+  "權限": ["permission", "role", "authz"],
+  "权限": ["permission", "role", "authz"],
+  "権限": ["permission", "role"],
+  "권한": ["permission", "role"],
+  "令牌": ["token", "jwt"],
+  "權杖": ["token", "jwt"],
+  "トークン": ["token"],
+  "토큰": ["token"],
 
-  // 解析/轉換相關
-  "解析": ["parse"],
-  "解": ["decode", "solve", "parse"],
-  "析": ["parse", "analyze"],
-  "轉": ["convert", "transform"],
-  "換": ["convert"],
-
-  // 數據/結構相關
-  "數": ["data"],
-  "據": ["data"],
-  "結": ["struct", "link"],
-  "構": ["struct", "construct"],
+  // Parse / Code / Data
+  "解析": ["parse", "analyze"],
+  "解": ["decode", "parse"],
+  "析": ["analyze", "parse"],
+  "パース": ["parse"],
+  "파싱": ["parse"],
+  "数据": ["data"],
   "數據": ["data"],
+  "データ": ["data"],
+  "데이터": ["data"],
+  "結構": ["struct", "structure"],
+  "结构": ["struct", "structure"],
+  "構造": ["struct", "structure"],
+  "구조": ["struct", "structure"],
 
-  // API/接口相關
-  "接": ["api", "interface", "connect"],
-  "口": ["api", "port"],
-  "示": ["api", "show", "display"],
-  "例": ["example", "app"],
+  // API / Interface / Service
+  "接口": ["api", "interface"],
+  "介面": ["api", "interface"],
+  "インターフェース": ["interface", "api"],
+  "인터페이스": ["interface", "api"],
+  "服务": ["service"],
+  "服務": ["service"],
+  "サービス": ["service"],
+  "서비스": ["service"],
+  "路由": ["router", "route"],
+  "路徑": ["path", "route"],
+  "路径": ["path", "route"],
+  "ルート": ["route", "router"],
+  "라우트": ["route", "router"],
 
-  // 數組/列表相關
-  "数": ["array", "list"],
-  "组": ["group", "array"],
-  "列": ["list", "column"],
-  "表": ["table", "list"],
+  // Database / Cache / Storage
+  "數據庫": ["database", "db"],
+  "数据库": ["database", "db"],
+  "データベース": ["database", "db"],
+  "데이터베이스": ["database", "db"],
+  "緩存": ["cache"],
+  "缓存": ["cache"],
+  "キャッシュ": ["cache"],
+  "캐시": ["cache"],
+  "存儲": ["store", "storage"],
+  "存储": ["store", "storage"],
+  "ストレージ": ["storage"],
+  "스토리지": ["storage"],
 
-  // 過程/功能相關
-  "处": ["handle", "process"],
-  "理": ["handle", "manage"],
-  "运": ["run", "operate"],
-  "行": ["run", "execute"],
-  "擷": ["capture", "select"],
-  "取": ["get", "select", "fetch"],
+  // Config / Setting / Env
+  "配置": ["config", "configuration"],
+  "設定": ["config", "setup", "setting"],
+  "設定ファイル": ["config"],
+  "설정": ["config", "setting"],
+  "環境": ["env", "environment"],
+  "环境": ["env", "environment"],
+  "환경": ["env", "environment"],
 
-  // 文件/文本相關
-  "文": ["file", "document", "text"],
-  "件": ["file", "item", "component"],
-  "本": ["content", "text"],
-  "字": ["text", "char", "word"],
-  "符": ["char", "symbol"],
-
-  // 設置/配置相關
-  "设": ["set", "setup"],
-  "置": ["set", "setup"],
-  "配": ["config", "prepare"],
-  "元": ["param", "element"],
-
-  // 緩存/存儲相關
-  "緩": ["cache"],
-  "存": ["save", "store"],
-  "儲": ["store", "reserve"],
-
-  // 連接/網絡相關
-  "连": ["connect"],
-  "网": ["network", "web"],
-  "络": ["network"],
-
-  // 更新/同步相關
-  "更": ["update", "change"],
-  "新": ["update"],
-  "同": ["sync", "same"],
-  "步": ["step", "process"],
-
-  // 錯誤/日誌相關
-  "错": ["error", "wrong"],
-  "误": ["error"],
-  "日志": ["log"],
-  "日": ["date", "log"],
-  "志": ["log"],
-
-  // 用戶/編輯相關
-  "用": ["user", "use"],
-  "户": ["user"],
-  "编": ["edit", "write"],
-  "辑": ["edit"],
-
-  // 測試/調試相關
-  "测": ["test", "measure"],
-  "试": ["test"],
-  "调": ["debug", "adjust"],
-  "試": ["test"],
-
-  // 模塊/組件相關
-  "模": ["module", "model"],
-  "塊": ["module", "block"],
-  "組": ["group", "component"],
-
-  // 異常/錯誤
-  "異": ["error", "abnormal"],
-  "常": ["common", "error"],
-  "失": ["fail", "lost"],
-  "敗": ["fail"],
-
-  // 服務/功能
-  "服": ["service", "serve"],
-  "務": ["service", "business"],
-  "功": ["function", "feature"],
-  "能": ["ability", "function"],
-
-  // 路徑/路徑相關
-  "路": ["path", "road"],
-  "径": ["path", "route"],
-
-  // 版本/更新
-  "唯": ["version", "unique"],
-  "號": ["number", "code"],
-
-  // 密碼/安全
-  "密": ["password", "secret"],
-  "碼": ["code", "password"],
-  "安": ["secure", "security"],
-  "全": ["safe", "security"],
+  // Error / Log / Debug / Test
+  "錯誤": ["error", "exception"],
+  "错误": ["error", "exception"],
+  "エラー": ["error"],
+  "에러": ["error"],
+  "異常": ["exception", "error"],
+  "异常": ["exception", "error"],
+  "日誌": ["log", "logger"],
+  "日志": ["log", "logger"],
+  "ログ": ["log"],
+  "로그": ["log"],
+  "調試": ["debug"],
+  "调试": ["debug"],
+  "デバッグ": ["debug"],
+  "디버그": ["debug"],
+  "測試": ["test", "spec"],
+  "测试": ["test", "spec"],
+  "テスト": ["test"],
+  "테스트": ["test"],
 };
 
 export function getCJKPairMap(): Record<string, string[]> {
   return PAIR_MAP;
 }
 
-// 雙語查詢：中英互轉
 export function bilingualLookup(term: string): string[] {
   const pairMap = getCJKPairMap();
-
-  // 轉小寫比對（英文）
   const lowerTerm = term.toLowerCase();
   if (pairMap[lowerTerm]) {
     return [lowerTerm, ...pairMap[lowerTerm]];
   }
 
-  // 標點轉換：login -> 登入, parse -> 解析
-  const EN_TO_ZH: Record<string, string> = {
-    "login": "登入",
-    "auth": "驗證",
-    "verify": "驗證",
-    "parse": "解析",
-    "decode": "解碼",
-    "convert": "轉換",
-    "handle": "處理",
-    "process": "過程",
-    "run": "運行",
-    "execute": "執行",
-    "get": "取得",
-    "fetch": "獲取",
-    "store": "存儲",
-    "save": "保存",
-    "set": "設置",
-    "setup": "設定",
-    "connect": "連接",
-    "network": "網絡",
-    "update": "更新",
-    "sync": "同步",
-    "error": "錯誤",
-    "fail": "失敗",
-    "user": "用戶",
-    "edit": "編輯",
-    "test": "測試",
-    "debug": "調試",
-    "module": "模塊",
-    "function": "功能",
-    "service": "服務",
-    "path": "路徑",
-    "cache": "緩存",
-    "data": "數據",
-    "file": "文件",
-    "text": "文本",
-    "code": "代碼",
-    "log": "日誌",
-    "security": "安全",
+  const EN_TO_MULTILINGUAL: Record<string, string[]> = {
+    "login": ["登入", "登录", "ログイン", "로그인"],
+    "auth": ["認證", "权限", "認証", "인증"],
+    "verify": ["驗證", "验证", "検証", "검증"],
+    "parse": ["解析", "パース", "파싱"],
+    "data": ["數據", "数据", "データ", "데이터"],
+    "struct": ["結構", "结构", "構造", "구조"],
+    "api": ["接口", "介面"],
+    "service": ["服務", "服务", "サービス", "서비스"],
+    "router": ["路由", "ルート", "라우트"],
+    "database": ["數據庫", "数据库", "データベース", "데이터베이스"],
+    "cache": ["緩存", "缓存", "キャッシュ", "캐시"],
+    "config": ["配置", "設定", "설정"],
+    "error": ["錯誤", "错误", "エラー", "에러"],
+    "log": ["日誌", "日志", "ログ", "로그"],
+    "debug": ["調試", "调试", "デバッグ", "디버그"],
+    "test": ["測試", "测试", "テスト", "테스트"],
   };
 
-  // 反查：找中文對應英文
-  const zhMatch = Object.entries(EN_TO_ZH).find(([, zh]) => zh === term);
-  if (zhMatch) {
-    return [term, zhMatch[0]];
+  for (const [en, words] of Object.entries(EN_TO_MULTILINGUAL)) {
+    if (en === lowerTerm || words.includes(term)) {
+      return [term, en, ...words];
+    }
   }
 
   return [term];

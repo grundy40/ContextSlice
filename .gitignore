@@ -1,10 +1,102 @@
+# Dependencies
 node_modules/
-build/
+.pnpm-store/
+
+# Production / Build Output
 dist/
-coverage/
-.DS_Store
-*.log
+build/
+.output/
+.next/
+.nuxt/
+.svelte-kit/
+dist-ssr/
+*.tsbuildinfo
+
+# Sensitive Environment & Config Files
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+.env.test
 .env*
 !.env.example
+
+# Private Keys, Certificates & Credentials
+*.pem
+*.key
+*.cert
+*.crt
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*.secret
+*.token
+credentials.json
+service-account*.json
+client_secret*.json
+secrets.json
+
+# Binaries, Compiled Files & Databases
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+*.obj
+*.o
+*.a
+*.lib
+*.db
+*.sqlite
+*.sqlite3
+
+# Images, Media & Binary Assets (Non-source code files)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.mp4
+*.mov
+*.mp3
+*.wav
+*.pdf
+*.zip
+*.tar
+*.gz
+*.rar
+*.7z
+
+# Logs & Temporary Files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+*.pid
+*.seed
+*.pid.lock
+tmp/
+temp/
+*.swp
+*.swo
+*~
+
+# OS & Editor Metadata
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# AI Studio Internal
 .aistudio/
 public/assets/aistudio/

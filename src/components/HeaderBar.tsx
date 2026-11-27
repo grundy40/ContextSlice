@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { Check, Eraser, Pencil, RefreshCw, Sparkles, Tag, X } from 'lucide-react';
 import { ProjectTagColor, ProjectTagConfig, WorkspaceView } from '../types/context';
+import { APP_VERSION } from '../version';
 
 interface ProactiveExpansionIndicator {
   enabled: boolean;
@@ -169,7 +170,7 @@ export function HeaderBar({
           <span className="font-display text-lg font-bold tracking-tight text-slate-50">
             ContextSlice
           </span>
-          <span className="text-[11px] font-mono text-slate-400">v0.1.1</span>
+          <span className="text-[11px] font-mono text-slate-400">{APP_VERSION}</span>
         </div>
 
         {onSaveProjectTag && (

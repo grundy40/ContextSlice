@@ -562,18 +562,8 @@ export function DependencyGraphView({
               尚未載入任何專案程式碼
             </p>
             <p className="text-xs text-slate-400 max-w-md leading-relaxed">
-              匯入你的本機資料夾、程式碼檔案，或直接貼上一段長程式碼，系統就會在瀏覽器端自動解析函式結構與依賴關係。
+              請點擊右上角「匯入資料夾 / 檔案」按鈕，選取本機資料夾、多個檔案或直接貼上程式碼，系統就會在瀏覽器端自動解析函式結構與依賴關係。
             </p>
-            {onOpenImport && (
-              <button
-                type="button"
-                onClick={onOpenImport}
-                className="mt-1 px-4 py-2 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <FolderOpen className="w-3.5 h-3.5" />
-                匯入資料夾 / 檔案
-              </button>
-            )}
           </div>
         ) : (
           <svg

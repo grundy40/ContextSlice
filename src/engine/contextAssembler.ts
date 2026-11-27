@@ -73,8 +73,25 @@ function expandQueryTerms(query: string): string[] {
   return Array.from(tokens);
 }
 
-export function scoreNodeRelevance(node: AstSymbolNode, queryTerms: string[]): number {
+export function scoreNodeRelevance(node: AstSymbolNode, queryTerms: string[], allNodes: AstSymbolNode[] = []): number {
   if (queryTerms.length === 0) return 0;
+  const totalNodes = Math.max(1, allNodes.length);
+
+  // Compute Document Frequency (DF) for each query term across workspace nodes
+  const termDF = new Map<string, number>();
+  for (const term of queryTerms) {
+    let df = 0;
+    for (const n of allNodes) {
+      if (
+        n.name.toLowerCase().includes(term) ||
+        n.filePath.toLowerCase().includes(term) ||
+        n.fullCode.toLowerCase().includes(term)
+      ) {
+        df++;
+      }
+    }
+    termDF.set(term, Math.max(1, df));
+  }
 
   const haystackName = node.name.toLowerCase();
   const haystackPath = node.filePath.toLowerCase();
@@ -84,35 +101,42 @@ export function scoreNodeRelevance(node: AstSymbolNode, queryTerms: string[]): n
   let score = 0;
   // CJK 權重調整因子：中文/日文/韓文匹配略高於ASCII
   const isCjkMatch = /[一-鿿぀-ゟ゠-ヿ가-힯]/.test(queryTerms.join(''));
-  const cjkWeight = isCjkMatch ? 1.15 : 1;  // CJK 查詢時，權重提升 15%
 
   for (const term of queryTerms) {
-    // 1. 名稱精確匹配
+    const df = termDF.get(term) || 1;
+    const idf = Math.log(1 + (totalNodes / df));
+    // 關鍵字稀缺度加權（TF-IDF 式防噪）：若詞頻過高（出現在 >30% 檔案中），大幅降權；專有名詞大幅加權
+    const scarcityMultiplier = df / totalNodes > 0.3 ? 0.35 : df / totalNodes > 0.15 ? 0.7 : 1.25;
+
+    let termScore = 0;
+    // 1. 名稱精確匹配（遠高於內文出現次數）
     if (haystackName === term) {
-      score += isCjkMatch ? 32 : 28;  // CJK: 32, ASCII: 28
+      termScore += isCjkMatch ? 36 : 32;  // CJK: 36, ASCII: 32
     }
     else if (haystackName.includes(term)) {
-      score += isCjkMatch ? 18 : 16;  // CJK: 18, ASCII: 16
+      termScore += isCjkMatch ? 22 : 20;  // CJK: 22, ASCII: 20
     }
 
     // 2. 路徑匹配
     if (haystackPath.includes(term)) {
-      score += isCjkMatch ? 9 : 8;
+      termScore += isCjkMatch ? 10 : 8;
     }
 
     // 3. 註解/Docstring 匹配
     if (haystackDoc.includes(term)) {
-      score += isCjkMatch ? 7 : 6;
+      termScore += isCjkMatch ? 8 : 6;
     }
 
     // 4. 函式體內文本語義匹配 (BM25-like saturation)
     const occ = haystackBody.split(term).length - 1;
     if (occ > 0) {
-      score += Math.min(12, 3 * Math.log1p(occ) * 2.5);
+      termScore += Math.min(10, 2.5 * Math.log1p(occ));
     }
+
+    score += termScore * idf * scarcityMultiplier;
   }
 
-  // 5. 偏好函式/方法：CJK 查詢時更懷疑名稱匹配
+  // 5. 偏好函式/方法
   if (score > 0 && (node.kind === 'function' || node.kind === 'method')) {
     score *= isCjkMatch ? 1.08 : 1.15;  // CJK: 1.08x, ASCII: 1.15x
   }
@@ -121,7 +145,6 @@ export function scoreNodeRelevance(node: AstSymbolNode, queryTerms: string[]): n
   if (isCjkMatch) {
     const englishTerms = queryTerms.filter(t => /^[a-z0-9_]+$/.test(t));
     if (englishTerms.length > 0) {
-      // 若有英文詞在中英雙語映射表中，檢查名稱是否匹配
       const hasEnglishMatch = englishTerms.some(eTerm => 
         haystackName.includes(eTerm) || haystackDoc.includes(eTerm)
       );
@@ -159,10 +182,10 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
 
   const queryTerms = expandQueryTerms(query);
 
-  // 1. Score all nodes
+  // 1. Score all nodes with TF-IDF scarcity weighting
   const scores = new Map<string, number>();
   for (const node of nodes) {
-    scores.set(node.id, scoreNodeRelevance(node, queryTerms));
+    scores.set(node.id, scoreNodeRelevance(node, queryTerms, nodes));
   }
 
   // 2. Determine focal nodes (pinned takes precedence, else top BM25 matches, else top exported function)

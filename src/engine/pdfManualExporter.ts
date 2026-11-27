@@ -1,5 +1,6 @@
 import { jsPDF } from 'jspdf';
 import { ContextAssemblyResult, DependencyEdge, NodeTier } from '../types/context';
+import { APP_VERSION } from '../version';
 
 export interface PdfManualExportInput {
   projectLabel: string;
@@ -110,7 +111,7 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
     if (!isFirst) {
       ctx.font = `500 8.5px ${SANS_FONT}`;
       ctx.fillStyle = '#64748B';
-      ctx.fillText('ContextSlice Studio v0.1.1 · 技術摘要說明書', MARGIN_X, 24);
+      ctx.fillText(`ContextSlice Studio ${APP_VERSION} · 技術摘要說明書`, MARGIN_X, 24);
       ctx.textAlign = 'right';
       ctx.fillText(projectLabel, A4_W - MARGIN_X, 24);
       ctx.textAlign = 'left';
@@ -166,7 +167,7 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
   ctx.font = `600 9px ${MONO_FONT}`;
   ctx.fillStyle = '#0284C7';
   ctx.textAlign = 'right';
-  ctx.fillText('v0.1.1 · OFFLINE BRIEF', A4_W - MARGIN_X - 14, y + 24);
+  ctx.fillText(`${APP_VERSION} · OFFLINE BRIEF`, A4_W - MARGIN_X - 14, y + 24);
   ctx.textAlign = 'left';
 
   ctx.font = `400 9.5px ${SANS_FONT}`;
@@ -426,7 +427,7 @@ export async function exportContextManualPdf(input: PdfManualExportInput): Promi
 
     fCtx.font = `400 8px ${SANS_FONT}`;
     fCtx.fillStyle = '#64748B';
-    fCtx.fillText('ContextSlice Studio v0.1.1 · 本機運算生成，未上傳任何原始碼', MARGIN_X, A4_H - 18);
+    fCtx.fillText(`ContextSlice Studio ${APP_VERSION} · 本機運算生成，未上傳任何原始碼`, MARGIN_X, A4_H - 18);
     fCtx.textAlign = 'right';
     fCtx.fillText(`第 ${idx + 1} 頁 / 共 ${totalPages} 頁`, A4_W - MARGIN_X, A4_H - 18);
     fCtx.textAlign = 'left';

@@ -1,4 +1,4 @@
-# ContextSlice Studio (`v0.1.4`)
+# ContextSlice Studio (`v0.2.0`)
 
 > **幫 AI 挑重點、省 Token 的程式結構分析與精簡工作台**  
 > 在把程式碼交給 AI 之前，先自動找出要修改的函式與上下游關聯，將其他無關細節摺疊成「只留名稱與參數的外框」，大幅縮小體積並避免上下文溢位。
@@ -191,6 +191,16 @@ npm run build
 ---
 
 ## 8. 版本更新紀錄
+
+### v0.2.0（2026-11-27）
+
+- **路徑消歧義與目錄配額限制（Path Disambiguation & Quota Cap）**：解決全端/微服務專案中多資料夾同名檔案（如 `frontend/utils/auth.ts` vs `backend/utils/auth.ts`）的誤判問題。評分時自動納入資料夾層級路徑匹配加權，並限制單一資料夾最多佔用 65% Token 預算，確保跨模組均衡分佈。
+- **Omitted Top Matches 省略提示摘要**：在 `<context_slice>` 結尾自動附加極短的 `<omitted_top_matches>` 提示標籤（列出受限於預算而被卡掉的前 3 名高相關函式與檔案位置），讓 AI 一目了然並主動呼叫 `expand_skeleton_cluster` 按需補抓。
+- **關鍵字稀缺度加權（簡易 TF-IDF）**：計算全專案文檔頻率（DF）與 IDF 稀缺度加權，自動對高頻通用詞（如 `data`、`id`、`error`）進行降權防噪。
+- **純記憶體 mtime 增量快取**：於 MCP 伺服器中實作執行期 `FILE_CACHE = new Map()`，透過比對 `fs.statSync(f).mtimeMs` 避免重複讀檔與正則解析。
+- **路徑限縮沙盒（subPath）與敏感檔過濾**：支援 `subPath` 參數與路徑越界防禦，並自動過濾 `.env`、`.pem`、`.key` 等機密檔案。
+- **零依賴 BPE Token 精度估算與 32K 預算**：內建與 tiktoken 高度對齊的零依賴子詞 Token 估算器，預設 Token 上限提升至 32K。
+- **未來擴充藍圖（Roadmap）**：預計支援專案專屬自訂同義詞與多語系字典配置檔（`.context/synonyms.json`）。
 
 ### v0.1.4（2026-11-23）
 

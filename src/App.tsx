@@ -82,7 +82,7 @@ export default function App() {
   const [budgetTokens, setBudgetTokens] = useState<number>(
     typeof savedPrefs.budgetTokens === 'number' && savedPrefs.budgetTokens > 0
       ? savedPrefs.budgetTokens
-      : 8000,
+      : 32768,
   );
   const [maxHops, setMaxHops] = useState<1 | 2>(savedPrefs.maxHops === 2 ? 2 : 1);
   const [proactiveDiscovery, setProactiveDiscovery] = useState<boolean>(
@@ -511,7 +511,6 @@ export default function App() {
       <ToolbarControls
         projectLabel={activeProjectLabel}
         fileCount={workspace.files.length}
-        onOpenImport={() => setImportOpen(true)}
         query={query}
         onChangeQuery={setQuery}
         onAutoFocusByQuery={handleAutoFocusByQuery}
@@ -657,7 +656,6 @@ export default function App() {
             edges={workspace.edges}
             selectedNodeId={effectiveSelectedNodeId}
             focusRequest={focusRequest}
-            onOpenImport={() => setImportOpen(true)}
             onSelectNode={setSelectedNodeId}
             onToggleFocal={handleToggleFocal}
             onSetOverride={handleSetOverride}

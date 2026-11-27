@@ -1,6 +1,6 @@
 import { ImportReport } from '../types/context';
 
-export const MAX_IMPORT_FILES = 80;
+export const MAX_IMPORT_FILES = 200;
 export const MAX_IMPORT_FILE_BYTES = 1_500_000;
 
 /**
@@ -65,6 +65,43 @@ const IGNORED_DIR_NAME = new Set([
   'obj',
 ]);
 
+/** Parse .gitignore or .repomixignore content into RegExp matchers */
+export function parseGitignoreContent(content: string): RegExp[] {
+  const regexes: RegExp[] = [];
+  const lines = content.split('\n');
+  for (let line of lines) {
+    line = line.trim();
+    if (!line || line.startsWith('#')) continue;
+    line = line.replace(/\r$/, '');
+    if (line.startsWith('!')) continue; // skip negated patterns for simplicity
+
+    let pattern = line
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\?/g, '[^/]')
+      .replace(/\*\*/g, '.*')
+      .replace(/\*/g, '[^/]*');
+
+    if (line.startsWith('/')) {
+      pattern = '^' + pattern.slice(1);
+    } else {
+      pattern = '(^|/)' + pattern;
+    }
+
+    if (line.endsWith('/')) {
+      pattern = pattern + '(/|$)';
+    } else {
+      pattern = pattern + '($|/|\\.)';
+    }
+
+    try {
+      regexes.push(new RegExp(pattern, 'i'));
+    } catch {
+      // ignore invalid patterns
+    }
+  }
+  return regexes;
+}
+
 export interface LocalImportResult {
   files: Array<{ path: string; content: string }>;
   report: ImportReport;
@@ -74,19 +111,38 @@ export async function readFilesFromFileList(
   list: FileList,
   sourceLabel = '電腦選取檔案',
 ): Promise<LocalImportResult> {
+  const fileArray = Array.from(list);
+  const customIgnoreRegexes: RegExp[] = [];
+
+  // First pass: look for .gitignore or .repomixignore to extract custom ignore rules
+  for (const file of fileArray) {
+    const name = file.name.toLowerCase();
+    if (name === '.gitignore' || name === '.repomixignore') {
+      try {
+        const text = await file.text();
+        customIgnoreRegexes.push(...parseGitignoreContent(text));
+      } catch {
+        // ignore read failure
+      }
+    }
+  }
+
   const files: Array<{ path: string; content: string }> = [];
   let totalScanned = 0;
   let skippedUnsupported = 0;
   let skippedOversized = 0;
   let truncatedByLimit = 0;
 
-  for (const file of Array.from(list)) {
+  for (const file of fileArray) {
     const relPath =
       (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
-    if (IGNORED_IMPORT_DIRS.test(relPath)) continue;
+    const normalizedPath = relPath.replace(/\\/g, '/');
+
+    if (IGNORED_IMPORT_DIRS.test(normalizedPath)) continue;
+    if (customIgnoreRegexes.some((re) => re.test(normalizedPath))) continue;
 
     totalScanned += 1;
-    if (BINARY_FILE_EXT.test(file.name) || NOISE_FILE_RE.test(relPath.replace(/\\/g, '/'))) {
+    if (BINARY_FILE_EXT.test(file.name) || NOISE_FILE_RE.test(normalizedPath)) {
       skippedUnsupported += 1;
       continue;
     }
@@ -140,6 +196,27 @@ export interface HandleEntryLike {
 export async function readFilesFromDirectoryHandle(
   rootHandle: DirectoryHandleLike,
 ): Promise<LocalImportResult> {
+  const customIgnoreRegexes: RegExp[] = [];
+
+  // Pre-scan root directory for .gitignore or .repomixignore
+  try {
+    const iter = rootHandle.values ? rootHandle.values() : null;
+    if (iter) {
+      for await (const entry of iter) {
+        if (entry.kind === 'file' && entry.getFile) {
+          const lowerName = entry.name.toLowerCase();
+          if (lowerName === '.gitignore' || lowerName === '.repomixignore') {
+            const f = await entry.getFile();
+            const text = await f.text();
+            customIgnoreRegexes.push(...parseGitignoreContent(text));
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore pre-scan errors
+  }
+
   const files: Array<{ path: string; content: string }> = [];
   let totalScanned = 0;
   let skippedUnsupported = 0;
@@ -153,16 +230,21 @@ export async function readFilesFromDirectoryHandle(
     for await (const entry of iter) {
       if (entry.kind === 'directory') {
         if (IGNORED_DIR_NAME.has(entry.name)) continue;
-        await walk(entry, prefix ? `${prefix}/${entry.name}` : entry.name);
+        const dirRelPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (customIgnoreRegexes.some((re) => re.test(`${dirRelPath}/`))) continue;
+        await walk(entry, dirRelPath);
         continue;
       }
 
       if (entry.kind === 'file' && entry.getFile) {
         const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
-        if (IGNORED_IMPORT_DIRS.test(relPath)) continue;
+        const normalizedPath = relPath.replace(/\\/g, '/');
+
+        if (IGNORED_IMPORT_DIRS.test(normalizedPath)) continue;
+        if (customIgnoreRegexes.some((re) => re.test(normalizedPath))) continue;
 
         totalScanned += 1;
-        if (BINARY_FILE_EXT.test(entry.name) || NOISE_FILE_RE.test(relPath)) {
+        if (BINARY_FILE_EXT.test(entry.name) || NOISE_FILE_RE.test(normalizedPath)) {
           skippedUnsupported += 1;
           continue;
         }
