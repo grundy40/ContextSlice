@@ -1,4 +1,4 @@
-# ContextSlice Studio (`v0.3.3`)
+# ContextSlice Studio (`v0.3.4`)
 
 > **Targeted AST Code Slicing & Token Optimization Workbench for AI Coding**  
 > Before sending source code to an LLM, ContextSlice pinpoints the functions you are editing and traces their upstream/downstream call graph — keeping focal implementations intact while folding neighboring dependencies into compact signature skeletons to slash token usage and eliminate context bloat.
@@ -232,6 +232,12 @@ Please recommend the cleanest refactoring approach without breaking upstream cal
 ---
 
 ## 8. Changelog
+
+### `v0.3.4` (2026-11-27)
+
+- **Top-Level Constant Indexing & File Footer Preservation**:
+  - **Module-Level Constant Symbol Indexing (`src/engine/astParser.ts`, `src/engine/scriptGenerators.ts`)**: Added indent-0 constant and export assignment extraction across Python (`UPPER_SNAKE_CASE = ...`, `__all__`), TypeScript/JavaScript (`export const ... = ...`, `export default ...`, `module.exports = ...`), Go (`const (...)` / `var (...)` blocks and top-level declarations), and Rust (`pub const` / `static`), with balanced multi-line delimiter scanning (fixing semicolon-free TS/JS constant slicing) so module constants become first-class searchable symbols and graph targets in Web UI, CLI, and Tree-sitter/fallback MCP modes.
+  - **File Footer Preservation (`extractFileFooter`, `<file_footers>`)**: Added trailing ~20-line module export and constant assignment preservation across `src/engine/contextAssembler.ts` and `src/engine/scriptGenerators.ts`. Whenever a file is partially sliced into the output, trailing exports and constant assignments (such as Python `DEFAULT_TIMEOUT_CONFIG` or JS/TS `export default`) that are not already output verbatim are automatically preserved inside `<file_footers>`.
 
 ### `v0.3.3` (2026-11-27)
 

@@ -1,4 +1,4 @@
-# ContextSlice Studio (`v0.3.3`)
+# ContextSlice Studio (`v0.3.4`)
 
 > **幫 AI 挑重點、省 Token 的程式結構分析與精簡工作台**  
 > 在把程式碼交給 AI 之前，先自動找出要修改的函式與上下游關聯，將其他無關細節摺疊成「只留名稱與參數的外框」，大幅縮小體積並避免上下文溢位。
@@ -227,6 +227,12 @@ claude mcp add --scope user context-slice -- npx -y -p @grundy40/contextslice ct
 ---
 
 ## 8. 版本更新紀錄
+
+### v0.3.4（2026-11-27）
+
+- **頂層常數納入符號索引與檔案末尾匯出保留（Top-Level Constant Indexing & File Footer Preservation）**：
+  - **模組級別常數與匯出賦值索引（`src/engine/astParser.ts`、`src/engine/scriptGenerators.ts`）**：在瀏覽器 AST 解析器與零依賴 CLI／MCP 單檔產生器（含 Tree-sitter WASM 與離線狀態機雙模式）同步識別縮排為 0 的常數與匯出賦值（含 Python `UPPER_SNAKE_CASE = ...` 與 `__all__`、TS/JS `export const`、`export default`、`module.exports`、Go 頂層 `const` / `var` 區塊，以及 Rust `const` / `static`），並以多行括號平衡掃描修復無分號 TS/JS 常數截斷邊界，納入一級符號搜尋與切片保留範圍。
+  - **檔案末尾匯出區塊保留（`extractFileFooter`、`<file_footers>`）**：於 `src/engine/contextAssembler.ts` 與 `src/engine/scriptGenerators.ts` 新增結尾保留機制。當檔案被選中進入切片且未完整輸出時，除了檔案頂部 imports 之外，自動保留檔案最末尾約 20 行內未重複輸出的模組級別匯出與常數賦值（例如 Python `DEFAULT_TIMEOUT_CONFIG` 或 JS/TS `export default`），避免遺漏結尾宣告。
 
 ### v0.3.3（2026-11-27）
 

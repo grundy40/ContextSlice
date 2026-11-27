@@ -324,6 +324,98 @@ export function extractFileHeader(
   };
 }
 
+export interface FileFooterChunk {
+  startLine: number;
+  endLine: number;
+  text: string;
+}
+
+/**
+ * Preserves module-level exports and top-level constant assignments found within the
+ * trailing `tailLines` (~20) lines of a file (e.g., `export default`, `module.exports`,
+ * Python `DEFAULT_TIMEOUT_CONFIG = ...`, TS `export const`, Go `const (...)` / `var`).
+ */
+export function extractFileFooter(
+  content: string,
+  tailLines = 20,
+): { footer: string; startLine: number; endLine: number; chunks: FileFooterChunk[] } | null {
+  if (!content) return null;
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  let lastNonEmpty = lines.length - 1;
+  while (lastNonEmpty >= 0 && lines[lastNonEmpty].trim() === '') {
+    lastNonEmpty--;
+  }
+  if (lastNonEmpty < 0) return null;
+
+  const windowStart = Math.max(0, lastNonEmpty - tailLines + 1);
+  const stripFooterNoise = (line: string) =>
+    line
+      .replace(/(['"`])(?:\\.|(?!\1).)*\1/g, '""')
+      .replace(/\/\/.*$|#.*$/g, '');
+
+  const findTailStmtEnd = (startIdx: number): number => {
+    let paren = 0;
+    let bracket = 0;
+    let brace = 0;
+    for (let j = startIdx; j <= lastNonEmpty; j++) {
+      const clean = stripFooterNoise(lines[j]);
+      for (let k = 0; k < clean.length; k++) {
+        const ch = clean[k];
+        if (ch === '(') paren++;
+        else if (ch === ')') paren = Math.max(0, paren - 1);
+        else if (ch === '[') bracket++;
+        else if (ch === ']') bracket = Math.max(0, bracket - 1);
+        else if (ch === '{') brace++;
+        else if (ch === '}') brace = Math.max(0, brace - 1);
+      }
+      if (paren <= 0 && bracket <= 0 && brace <= 0) {
+        const t = lines[j].trimEnd();
+        if (t.endsWith('\\') || (t.endsWith('=') && !t.endsWith('=>'))) continue;
+        return j;
+      }
+    }
+    return lastNonEmpty;
+  };
+
+  const footerStartRe =
+    /^(?:export\s+default\s+(?!(?:async\s+)?(?:function|class|abstract\s+class|interface)\b)|export\s+(?:type\s+)?\{|export\s+\*\s+from\b|export\s+(?:const|let|var)\s+|module\.exports\s*=|exports\.[A-Za-z_$][A-Za-z0-9_$]*\s*=|(?:pub(?:\([^)]+\))?\s+)?(?:const|static)\s+[A-Za-z_][A-Za-z0-9_]*|(?:const|var)\s*\(|(?:const|var)\s+[A-Z][A-Za-z0-9_]*\b|(?:[A-Z][A-Z0-9_]+|__all__|__version__)\s*(?::\s*[^=\n]+)?=\s*(?!=))/;
+
+  const chunks: FileFooterChunk[] = [];
+  let i = windowStart;
+  while (i <= lastNonEmpty) {
+    const raw = lines[i];
+    if (!raw || /^\s/.test(raw)) {
+      i++;
+      continue;
+    }
+    const trimmed = raw.trim();
+    if (
+      trimmed.startsWith('//') ||
+      trimmed.startsWith('#') ||
+      trimmed.startsWith('/*') ||
+      !footerStartRe.test(raw)
+    ) {
+      i++;
+      continue;
+    }
+    const endIdx = findTailStmtEnd(i);
+    chunks.push({
+      startLine: i + 1,
+      endLine: endIdx + 1,
+      text: lines.slice(i, endIdx + 1).join('\n'),
+    });
+    i = endIdx + 1;
+  }
+
+  if (chunks.length === 0) return null;
+  return {
+    footer: chunks.map((c) => c.text).join('\n'),
+    startLine: chunks[0].startLine,
+    endLine: chunks[chunks.length - 1].endLine,
+    chunks,
+  };
+}
+
 export function assembleDynamicContext(options: AssembleOptions): ContextAssemblyResult {
   const {
     workspace,
@@ -477,11 +569,15 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
           reason = eng.reasonHopMap(hop);
         }
       } else if (
-        (node.kind === 'interface' || node.kind === 'type') &&
+        (node.kind === 'interface' ||
+          node.kind === 'type' ||
+          (node.kind === 'const' &&
+            (node.exported || /^[A-Z][A-Z0-9_]+$/.test(node.name)) &&
+            node.lineCount <= 25)) &&
         focalIds.some((fid) => nodes.find((x) => x.id === fid)?.fileId === node.fileId) &&
         node.skeletonTokens <= remainingBudget
       ) {
-        // Same-file types are essential for single-file monolith edits
+        // Same-file types and module-level constants are essential for single-file edits
         tier = 'skeleton';
         remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
         reason = eng.reasonSameFileType;
@@ -602,7 +698,14 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
   // Preserve top-level imports, constants & types for every file that contributes code blocks
   const fileById = new Map(workspace.files.map((f) => [f.id, f]));
   const fullStart1EndLine = new Map<string, number>();
+  const coveredRangesByFile = new Map<string, Array<[number, number]>>();
+  const addCoveredRange = (fileId: string, start: number, end: number) => {
+    const arr = coveredRangesByFile.get(fileId) ?? [];
+    arr.push([start, end]);
+    coveredRangesByFile.set(fileId, arr);
+  };
   for (const p of fullBlocks) {
+    addCoveredRange(p.node.fileId, p.node.startLine, p.node.endLine);
     if (p.node.startLine === 1) {
       fullStart1EndLine.set(
         p.node.fileId,
@@ -610,7 +713,14 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
       );
     }
   }
+  for (const p of skeletonBlocks) {
+    if (p.node.skeletonCode === p.node.fullCode) {
+      addCoveredRange(p.node.fileId, p.node.startLine, p.node.endLine);
+    }
+  }
+
   const seenFileIds = new Set<string>();
+  const headerEndByFile = new Map<string, number>();
   const preservedHeaders: Array<{ filePath: string; endLine: number; header: string }> = [];
   for (const p of [...fullBlocks, ...skeletonBlocks]) {
     if (seenFileIds.has(p.node.fileId)) continue;
@@ -621,7 +731,35 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     if (!hdr) continue;
     const coveredEnd = fullStart1EndLine.get(p.node.fileId) ?? 0;
     if (coveredEnd >= hdr.endLine) continue;
+    headerEndByFile.set(file.id, hdr.endLine);
     preservedHeaders.push({ filePath: file.path, endLine: hdr.endLine, header: hdr.header });
+  }
+
+  const preservedFooters: Array<{ filePath: string; startLine: number; endLine: number; footer: string }> = [];
+  for (const fileId of seenFileIds) {
+    const file = fileById.get(fileId);
+    if (!file) continue;
+    const hasUnfullNode = nodePlans.some((p) => p.node.fileId === fileId && p.tier !== 'full');
+    const ranges = coveredRangesByFile.get(fileId) ?? [];
+    const wholeFileCovered = ranges.some(([s, e]) => s <= 1 && e >= file.lineCount);
+    if (!hasUnfullNode && wholeFileCovered) continue;
+
+    const ftr = extractFileFooter(file.content);
+    if (!ftr) continue;
+    const hdrEnd = headerEndByFile.get(fileId) ?? 0;
+    const uncoveredChunks = ftr.chunks.filter(
+      (c) =>
+        c.startLine > hdrEnd &&
+        !ranges.some(([s, e]) => c.startLine >= s && c.endLine <= e),
+    );
+    if (uncoveredChunks.length > 0) {
+      preservedFooters.push({
+        filePath: file.path,
+        startLine: uncoveredChunks[0].startLine,
+        endLine: uncoveredChunks[uncoveredChunks.length - 1].endLine,
+        footer: uncoveredChunks.map((c) => c.text).join('\n'),
+      });
+    }
   }
 
   if (preservedHeaders.length > 0) {
@@ -665,6 +803,18 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
       packetSections.push('');
     }
     packetSections.push('  </focal_implementations>');
+  }
+
+  if (preservedFooters.length > 0) {
+    packetSections.push(
+      '  <file_footers note="Module-level exports and tail constant assignments preserved for partially sliced files">',
+    );
+    for (const ftr of preservedFooters) {
+      packetSections.push(`    // [${ftr.filePath}:${ftr.startLine}-${ftr.endLine}] (file footer)`);
+      packetSections.push(ftr.footer);
+      packetSections.push('');
+    }
+    packetSections.push('  </file_footers>');
   }
 
   packetSections.push('</context_slice>');

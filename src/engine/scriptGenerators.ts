@@ -146,6 +146,231 @@ function extractFileHeader(content, maxLines = 50, maxObjectLines = 60) {
 }
 `;
 
+const EXTRACT_FOOTER_AND_CONST_SOURCE = String.raw`
+function findStatementEndLine(lines, startIdx, mode) {
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let inBlockComment = false;
+  let pyTripleQuote = null;
+  const maxScan = Math.min(lines.length - 1, startIdx + 120);
+
+  for (let j = startIdx; j <= maxScan; j++) {
+    const raw = lines[j];
+    const len = raw.length;
+    let k = 0;
+    while (k < len) {
+      const ch = raw[k];
+      const next = raw[k + 1];
+      const next3 = mode === 'py' ? raw.slice(k, k + 3) : '';
+      if (pyTripleQuote) {
+        if (next3 === pyTripleQuote) { pyTripleQuote = null; k += 3; continue; }
+        k++; continue;
+      }
+      if (inBlockComment) {
+        if (ch === '*' && next === '/') { inBlockComment = false; k += 2; continue; }
+        k++; continue;
+      }
+      if (mode === 'py' && ch === '#') break;
+      if (mode !== 'py' && ch === '/' && next === '/') break;
+      if (mode !== 'py' && ch === '/' && next === '*') { inBlockComment = true; k += 2; continue; }
+      if (mode === 'py' && (next3 === '"""' || next3 === "'''")) { pyTripleQuote = next3; k += 3; continue; }
+      if (ch === '"' || ch === "'" || (mode === 'ts' && ch === '\x60') || (mode === 'go' && ch === '\x60')) {
+        const quote = ch;
+        k++;
+        while (k < len) {
+          if (quote !== '\x60' && raw[k] === '\\') { k += 2; continue; }
+          if (raw[k] === quote) { k++; break; }
+          k++;
+        }
+        continue;
+      }
+      if (ch === '(') parenDepth++;
+      else if (ch === ')') parenDepth = Math.max(0, parenDepth - 1);
+      else if (ch === '[') bracketDepth++;
+      else if (ch === ']') bracketDepth = Math.max(0, bracketDepth - 1);
+      else if (ch === '{') braceDepth++;
+      else if (ch === '}') braceDepth = Math.max(0, braceDepth - 1);
+      k++;
+    }
+    if (!inBlockComment && !pyTripleQuote && parenDepth <= 0 && bracketDepth <= 0 && braceDepth <= 0) {
+      const trimmedEnd = raw.trimEnd();
+      if (trimmedEnd.endsWith('\\')) continue;
+      if (trimmedEnd.endsWith('=') && !trimmedEnd.endsWith('=>')) continue;
+      return j;
+    }
+  }
+  return maxScan;
+}
+
+function extractTopLevelConstants(code, ext, existingBlocks) {
+  const e = (ext || '').toLowerCase();
+  const lines = String(code || '').replace(/\r\n/g, '\n').split('\n');
+  const covered = (existingBlocks || []).map((b) => [b.startLine, b.endLine]);
+  const isCovered = (ln) => covered.some(([s, en]) => ln >= s && ln <= en);
+  const out = [];
+
+  if (e === '.py' || e === '.pyw') {
+    for (let i = 0; i < lines.length; i++) {
+      const ln = i + 1;
+      if (isCovered(ln)) continue;
+      const line = lines[i];
+      const m = line.match(/^([A-Z][A-Z0-9_]+|__all__|__version__)\s*(?::\s*[^=\n]+)?=\s*(?!=)/);
+      if (!m) continue;
+      const endIdx = findStatementEndLine(lines, i, 'py');
+      const endLine = endIdx + 1;
+      covered.push([ln, endLine]);
+      const full = lines.slice(i, endLine).join('\n');
+      const lineCount = endLine - ln + 1;
+      const skeleton = lineCount <= 8 ? full : line + '\n    # ... ' + (lineCount - 1) + ' lines folded';
+      out.push({ name: m[1], kind: 'const', exported: !m[1].startsWith('_') || m[1] === '__all__', startLine: ln, endLine, full, skeleton });
+      i = endIdx;
+    }
+    return out;
+  }
+
+  if (e === '.go') {
+    for (let i = 0; i < lines.length; i++) {
+      const ln = i + 1;
+      if (isCovered(ln)) continue;
+      const line = lines[i];
+      const gm = line.match(/^(const|var)\s*\(/);
+      if (gm) {
+        const endIdx = findStatementEndLine(lines, i, 'go');
+        const endLine = endIdx + 1;
+        covered.push([ln, endLine]);
+        const names = [];
+        for (let j = i + 1; j <= endIdx; j++) {
+          const im = lines[j].match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\b/);
+          if (im && im[1] !== '_' && im[1] !== 'iota') names.push(im[1]);
+        }
+        const name = names.length > 0 ? names.slice(0, 4).join(', ') : gm[1] + '_block';
+        const full = lines.slice(i, endLine).join('\n');
+        const lineCount = endLine - ln + 1;
+        const skeleton = lineCount <= 12 ? full : line + '\n\t// ... ' + (lineCount - 2) + ' lines folded\n)';
+        out.push({ name, kind: 'const', exported: names.some((n) => /^[A-Z]/.test(n)), startLine: ln, endLine, full, skeleton });
+        i = endIdx;
+        continue;
+      }
+      const sm = line.match(/^(const|var)\s+([A-Za-z_][A-Za-z0-9_]*)\b/);
+      if (sm) {
+        const endIdx = findStatementEndLine(lines, i, 'go');
+        const endLine = endIdx + 1;
+        covered.push([ln, endLine]);
+        const full = lines.slice(i, endLine).join('\n');
+        const lineCount = endLine - ln + 1;
+        const skeleton = lineCount <= 8 ? full : line + '\n\t// ... ' + (lineCount - 1) + ' lines folded';
+        out.push({ name: sm[2], kind: 'const', exported: /^[A-Z]/.test(sm[2]), startLine: ln, endLine, full, skeleton });
+        i = endIdx;
+      }
+    }
+    return out;
+  }
+
+  if (e === '.rs') {
+    for (let i = 0; i < lines.length; i++) {
+      const ln = i + 1;
+      if (isCovered(ln)) continue;
+      const line = lines[i];
+      const rm = line.match(/^(?:pub(?:\([^)]+\))?\s+)?(?:const|static)\s+([A-Z][A-Z0-9_]*)\b/);
+      if (!rm) continue;
+      const endIdx = findStatementEndLine(lines, i, 'rs');
+      const endLine = endIdx + 1;
+      covered.push([ln, endLine]);
+      const full = lines.slice(i, endLine).join('\n');
+      const lineCount = endLine - ln + 1;
+      const skeleton = lineCount <= 8 ? full : line + '\n  /* ... ' + (lineCount - 1) + ' lines folded */';
+      out.push({ name: rm[1], kind: 'const', exported: line.startsWith('pub'), startLine: ln, endLine, full, skeleton });
+      i = endIdx;
+    }
+    return out;
+  }
+
+  if (['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'].includes(e)) {
+    for (let i = 0; i < lines.length; i++) {
+      const ln = i + 1;
+      if (isCovered(ln)) continue;
+      const line = lines[i];
+      let name = null;
+      let exported = false;
+      const cm = line.match(/^(export\s+)?(?:declare\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/);
+      if (cm) {
+        exported = Boolean(cm[1]);
+        if (exported || /^[A-Z][A-Z0-9_]+$/.test(cm[2])) name = cm[2];
+      } else {
+        const tm = line.match(/^(?:export\s+(default)\s+(?!(?:async\s+)?(?:function|class|abstract\s+class|interface)\b)|(module\.exports)\s*=)/);
+        if (tm) { name = tm[1] ? 'default' : 'module.exports'; exported = true; }
+      }
+      if (!name) continue;
+      const endIdx = findStatementEndLine(lines, i, 'ts');
+      const endLine = endIdx + 1;
+      const full = lines.slice(i, endLine).join('\n');
+      if (full.includes('=>') && !name.startsWith('default')) continue;
+      covered.push([ln, endLine]);
+      const lineCount = endLine - ln + 1;
+      const skeleton = lineCount <= 10 ? full : line + '\n  /* ... ' + (lineCount - 1) + ' lines folded */';
+      out.push({ name, kind: 'const', exported, startLine: ln, endLine, full, skeleton });
+      i = endIdx;
+    }
+  }
+  return out;
+}
+
+function extractFileFooter(content, tailLines = 20) {
+  if (!content) return null;
+  const lines = String(content).replace(/\r\n/g, '\n').split('\n');
+  let lastNonEmpty = lines.length - 1;
+  while (lastNonEmpty >= 0 && lines[lastNonEmpty].trim() === '') lastNonEmpty--;
+  if (lastNonEmpty < 0) return null;
+  const windowStart = Math.max(0, lastNonEmpty - tailLines + 1);
+  const stripFooterNoise = (line) =>
+    line.replace(/(['"\x60])(?:\\.|(?!\1).)*\1/g, '""').replace(/\/\/.*$|#.*$/g, '');
+  const findTailStmtEnd = (startIdx) => {
+    let paren = 0, bracket = 0, brace = 0;
+    for (let j = startIdx; j <= lastNonEmpty; j++) {
+      const clean = stripFooterNoise(lines[j]);
+      for (let k = 0; k < clean.length; k++) {
+        const ch = clean[k];
+        if (ch === '(') paren++;
+        else if (ch === ')') paren = Math.max(0, paren - 1);
+        else if (ch === '[') bracket++;
+        else if (ch === ']') bracket = Math.max(0, bracket - 1);
+        else if (ch === '{') brace++;
+        else if (ch === '}') brace = Math.max(0, brace - 1);
+      }
+      if (paren <= 0 && bracket <= 0 && brace <= 0) {
+        const t = lines[j].trimEnd();
+        if (t.endsWith('\\') || (t.endsWith('=') && !t.endsWith('=>'))) continue;
+        return j;
+      }
+    }
+    return lastNonEmpty;
+  };
+  const footerStartRe =
+    /^(?:export\s+default\s+(?!(?:async\s+)?(?:function|class|abstract\s+class|interface)\b)|export\s+(?:type\s+)?\{|export\s+\*\s+from\b|export\s+(?:const|let|var)\s+|module\.exports\s*=|exports\.[A-Za-z_$][A-Za-z0-9_$]*\s*=|(?:pub(?:\([^)]+\))?\s+)?(?:const|static)\s+[A-Za-z_][A-Za-z0-9_]*|(?:const|var)\s*\(|(?:const|var)\s+[A-Z][A-Za-z0-9_]*\b|(?:[A-Z][A-Z0-9_]+|__all__|__version__)\s*(?::\s*[^=\n]+)?=\s*(?!=))/;
+  const chunks = [];
+  let i = windowStart;
+  while (i <= lastNonEmpty) {
+    const raw = lines[i];
+    if (!raw || /^\s/.test(raw)) { i++; continue; }
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('/*') || !footerStartRe.test(raw)) {
+      i++; continue;
+    }
+    const endIdx = findTailStmtEnd(i);
+    chunks.push({ startLine: i + 1, endLine: endIdx + 1, text: lines.slice(i, endIdx + 1).join('\n') });
+    i = endIdx + 1;
+  }
+  if (chunks.length === 0) return null;
+  return {
+    footer: chunks.map((c) => c.text).join('\n'),
+    startLine: chunks[0].startLine,
+    endLine: chunks[chunks.length - 1].endLine,
+    chunks
+  };
+}
+`;
+
 const CJK_MULTILINGUAL_WORDS = {
   // Auth / Login (Traditional, Simplified, Japanese, Korean)
   "登": ["login", "auth", "verify", "signin"],
@@ -506,15 +731,23 @@ function extractBlocks(code, ext, fileName) {
     }
 
     if (name) {
-      const end = findBraceEnd(lines, i);
+      const isStmtOnly = kind === 'const' || (kind === 'type' && !line.includes('{'));
+      const end = isStmtOnly ? findStatementEndLine(lines, i, 'ts') : findBraceEnd(lines, i);
       const full = lines.slice(i, end + 1).join('\\n');
       const sigIdx = full.indexOf('{');
-      const skeleton = (kind === 'interface' || kind === 'type' || sigIdx === -1 || end - i < 4)
+      const isShortConst = kind === 'const' && (end - i + 1) <= 10 && !full.includes('=>');
+      const skeleton = (kind === 'interface' || kind === 'type' || isShortConst || sigIdx === -1 || end - i < 4)
         ? full
         : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
-      blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+      blocks.push({ name, kind, exported: line.startsWith('export '), startLine: i + 1, endLine: end + 1, full, skeleton });
       if (kind !== 'class' && kind !== 'module') i = end;
     }
+  }
+
+  const topConsts = extractTopLevelConstants(code, e, blocks);
+  if (topConsts.length > 0) {
+    blocks.push(...topConsts);
+    blocks.sort((a, b) => a.startLine - b.startLine);
   }
 
   if (blocks.length === 0 && lines.length > 0) {
@@ -527,19 +760,25 @@ function extractBlocks(code, ext, fileName) {
 }
 
 ${EXTRACT_FILE_HEADER_SOURCE}
+${EXTRACT_FOOTER_AND_CONST_SOURCE}
 
 const files = walk(targetRoot);
 const terms = expandQueryTerms(query);
 const allRawBlocks = [];
 const fileHeaders = new Map();
+const fileFooters = new Map();
+const fileLineCounts = new Map();
 for (const filePath of files) {
   try {
     const buf = fs.readFileSync(filePath);
     if (isBinaryBuffer(buf)) continue;
     const content = buf.toString('utf8');
     const relPath = path.relative(targetRoot, filePath);
+    fileLineCounts.set(relPath, content.split('\\n').length);
     const hdr = extractFileHeader(content);
     if (hdr) fileHeaders.set(relPath, hdr);
+    const ftr = extractFileFooter(content);
+    if (ftr) fileFooters.set(relPath, ftr);
     const items = extractBlocks(content, path.extname(filePath), relPath);
     for (const b of items) {
       allRawBlocks.push({
@@ -581,13 +820,20 @@ const scored = allRawBlocks.map((b) => {
   return { ...b, score };
 }).sort((a, b) => b.score - a.score);
 
-// True Call Graph (SymbolMap + Word-Boundary Call Matching + BFS maxHops)
+// True Call Graph (SymbolMap + Word-Boundary Call/Constant Matching + BFS maxHops)
 const symbolMap = new Map();
+const constSymbolNames = new Set();
 for (let i = 0; i < scored.length; i++) {
   const b = scored[i];
   if (b.name && b.kind !== 'module' && !CONTROL_WORDS.has(b.name)) {
-    if (!symbolMap.has(b.name)) symbolMap.set(b.name, []);
-    symbolMap.get(b.name).push(i);
+    const names = (b.kind === 'const' && b.name.includes(','))
+      ? b.name.split(',').map((s) => s.trim()).filter(Boolean)
+      : [b.name];
+    for (const sn of names) {
+      if (!symbolMap.has(sn)) symbolMap.set(sn, []);
+      symbolMap.get(sn).push(i);
+      if (b.kind === 'const') constSymbolNames.add(sn);
+    }
   }
 }
 const callAdj = Array.from({ length: scored.length }, () => new Set());
@@ -599,7 +845,9 @@ for (let i = 0; i < scored.length; i++) {
     if (sym === caller.name) continue;
     if (maskedCaller.includes(sym)) {
       const esc = sym.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
-      if (new RegExp('\\\\b' + esc + '\\\\s*\\\\(', 'm').test(maskedCaller)) {
+      const isConstRef = constSymbolNames.has(sym) && sym.length >= 3;
+      const re = isConstRef ? new RegExp('\\\\b' + esc + '\\\\b', 'm') : new RegExp('\\\\b' + esc + '\\\\s*\\\\(', 'm');
+      if (re.test(maskedCaller)) {
         for (const t of (symbolMap.get(sym) || [])) {
           callAdj[i].add(t);
           callAdj[t].add(i);
@@ -609,11 +857,13 @@ for (let i = 0; i < scored.length; i++) {
   }
 }
 const hopDistances = new Map();
+const focalFiles = new Set();
 const bfsQ = [];
 for (let i = 0; i < scored.length; i++) {
   if (scored[i].score > 0 && bfsQ.length < 3) {
     bfsQ.push(i);
     hopDistances.set(i, 0);
+    focalFiles.add(scored[i].filePath);
   }
 }
 let qHead = 0;
@@ -634,6 +884,12 @@ const out = ['<context_slice root="' + path.basename(targetRoot) + '" version="$
 const includedIds = new Set();
 const includedFiles = new Set();
 const fullStart1EndLine = new Map();
+const coveredRangesByFile = new Map();
+const partialFiles = new Set();
+const addCoveredRange = (fp, s, e) => {
+  if (!coveredRangesByFile.has(fp)) coveredRangesByFile.set(fp, []);
+  coveredRangesByFile.get(fp).push([s, e]);
+};
 const dirBudgetUsed = {};
 const maxDirBudget = budget * 0.65;
 
@@ -651,39 +907,68 @@ for (let i = 0; i < scored.length; i++) {
     dirBudgetUsed[topDir] = curDir + item.rawTokens;
     includedIds.add(key);
     includedFiles.add(item.filePath);
+    addCoveredRange(item.filePath, item.startLine, item.endLine);
     if (item.startLine === 1) {
       fullStart1EndLine.set(item.filePath, Math.max(fullStart1EndLine.get(item.filePath) || 0, item.endLine));
     }
     out.push(\`  <!-- FULL: \${item.filePath}:\${item.startLine}-\${item.endLine} (\${item.rawTokens} tokens) -->\`);
     out.push(item.full);
   } else if (item.skelTokens <= remaining && curDir + item.skelTokens <= maxDirBudget) {
-    const linked = (hop !== undefined && hop <= ${maxHops}) || item.score > 0;
+    const sameFileConst = item.kind === 'const' && (item.exported || /^[A-Z][A-Z0-9_]+$/.test(item.name)) && (item.endLine - item.startLine + 1) <= 25 && focalFiles.has(item.filePath);
+    const linked = (hop !== undefined && hop <= ${maxHops}) || item.score > 0 || sameFileConst;
     if (linked || i < 12) {
       remaining -= item.skelTokens;
       dirBudgetUsed[topDir] = curDir + item.skelTokens;
       includedIds.add(key);
       includedFiles.add(item.filePath);
+      partialFiles.add(item.filePath);
+      if (item.skeleton === item.full) {
+        addCoveredRange(item.filePath, item.startLine, item.endLine);
+      }
       out.push(\`  <!-- SKELETON: \${item.filePath}:\${item.startLine}-\${item.endLine} (\${item.skelTokens} tokens) -->\`);
       out.push(item.skeleton);
     } else {
+      partialFiles.add(item.filePath);
       candidateItems.push(item);
     }
   } else {
+    partialFiles.add(item.filePath);
     candidateItems.push(item);
   }
 }
 
 const headerChunks = [];
+const headerEndByFile = new Map();
 for (const fp of includedFiles) {
   const hdr = fileHeaders.get(fp);
   if (!hdr) continue;
   const coveredEnd = fullStart1EndLine.get(fp) || 0;
   if (coveredEnd >= hdr.endLine) continue;
+  headerEndByFile.set(fp, hdr.endLine);
   headerChunks.push(\`  <!-- FILE_HEADER: \${fp}:1-\${hdr.endLine} -->\`);
   headerChunks.push(hdr.header);
 }
 if (headerChunks.length > 0) {
   out.splice(1, 0, '<file_headers>', ...headerChunks, '</file_headers>');
+}
+
+const footerChunks = [];
+for (const fp of includedFiles) {
+  const ftr = fileFooters.get(fp);
+  if (!ftr) continue;
+  const ranges = coveredRangesByFile.get(fp) || [];
+  const totalLines = fileLineCounts.get(fp) || 0;
+  const wholeFileCovered = ranges.some(([s, e]) => s <= 1 && e >= totalLines);
+  if (!partialFiles.has(fp) && wholeFileCovered) continue;
+  const hdrEnd = headerEndByFile.get(fp) || 0;
+  const uncovered = ftr.chunks.filter((c) => c.startLine > hdrEnd && !ranges.some(([s, e]) => c.startLine >= s && c.endLine <= e));
+  if (uncovered.length > 0) {
+    footerChunks.push(\`  <!-- FILE_FOOTER: \${fp}:\${uncovered[0].startLine}-\${uncovered[uncovered.length - 1].endLine} -->\`);
+    footerChunks.push(uncovered.map((c) => c.text).join('\\n'));
+  }
+}
+if (footerChunks.length > 0) {
+  out.push('<file_footers>', ...footerChunks, '</file_footers>');
 }
 
 const omitted = candidateItems.filter(item => item.score > 0 && !includedIds.has(item.filePath + ':' + item.startLine)).slice(0, 3);
@@ -1197,15 +1482,23 @@ function extractBlocks(code, ext, fileName) {
     }
 
     if (name) {
-      const end = findBraceEnd(lines, i);
+      const isStmtOnly = kind === 'const' || (kind === 'type' && !line.includes('{'));
+      const end = isStmtOnly ? findStatementEndLine(lines, i, 'ts') : findBraceEnd(lines, i);
       const full = lines.slice(i, end + 1).join('\\n');
       const sigIdx = full.indexOf('{');
-      const skeleton = (kind === 'interface' || kind === 'type' || sigIdx === -1 || end - i < 4)
+      const isShortConst = kind === 'const' && (end - i + 1) <= 10 && !full.includes('=>');
+      const skeleton = (kind === 'interface' || kind === 'type' || isShortConst || sigIdx === -1 || end - i < 4)
         ? full
         : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
-      blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
+      blocks.push({ name, kind, exported: line.startsWith('export '), startLine: i + 1, endLine: end + 1, full, skeleton });
       if (kind !== 'class' && kind !== 'module') i = end;
     }
+  }
+
+  const topConsts = extractTopLevelConstants(code, e, blocks);
+  if (topConsts.length > 0) {
+    blocks.push(...topConsts);
+    blocks.sort((a, b) => a.startLine - b.startLine);
   }
 
   if (blocks.length === 0 && lines.length > 0) {
@@ -1219,6 +1512,9 @@ function extractBlocks(code, ext, fileName) {
 
   return blocks;
 }
+
+${EXTRACT_FILE_HEADER_SOURCE}
+${EXTRACT_FOOTER_AND_CONST_SOURCE}
 
 async function collectProjectBlocks(root, scanRoot) {
   const files = [];
@@ -1239,10 +1535,10 @@ async function collectProjectBlocks(root, scanRoot) {
     }
   }
 
-  ${EXTRACT_FILE_HEADER_SOURCE}
-
   const allBlocks = [];
   const headerMap = new Map();
+  const footerMap = new Map();
+  const lineCountMap = new Map();
   for (const f of files) {
     const rel = path.relative(root, f);
     let stat;
@@ -1257,27 +1553,36 @@ async function collectProjectBlocks(root, scanRoot) {
     let items;
     let parserMode = 'regex';
     let fileHeader = null;
+    let fileFooter = null;
+    let fileLines = 0;
     if (cached && cached.mtime === mtime) {
       items = cached.items;
       parserMode = cached.parserMode || 'regex';
       fileHeader = cached.header ?? null;
+      fileFooter = cached.footer ?? null;
+      fileLines = cached.lineCount || 0;
     } else {
       const rawBuf = fs.readFileSync(f);
       if (isBinaryBuffer(rawBuf)) continue;
       const raw = rawBuf.toString('utf8');
+      fileLines = raw.split('\\n').length;
       fileHeader = extractFileHeader(raw);
+      fileFooter = extractFileFooter(raw);
       const ext = path.extname(f);
       const tsBlocks = await extractBlocksWithTreeSitter(raw, ext, rel);
       if (tsBlocks && tsBlocks.length > 0) {
-        items = tsBlocks;
+        const extraConsts = extractTopLevelConstants(raw, ext, tsBlocks);
+        items = extraConsts.length > 0 ? [...tsBlocks, ...extraConsts].sort((a, b) => a.startLine - b.startLine) : tsBlocks;
         parserMode = 'tree-sitter-wasm';
       } else {
         items = extractBlocks(raw, ext, rel);
         parserMode = 'state-machine-regex';
       }
-      FILE_CACHE.set(f, { mtime, parserMode, items, header: fileHeader });
+      FILE_CACHE.set(f, { mtime, parserMode, items, header: fileHeader, footer: fileFooter, lineCount: fileLines });
     }
     if (fileHeader) headerMap.set(rel, fileHeader);
+    if (fileFooter) footerMap.set(rel, fileFooter);
+    lineCountMap.set(rel, fileLines);
 
     for (const b of items) {
       allBlocks.push({
@@ -1290,7 +1595,7 @@ async function collectProjectBlocks(root, scanRoot) {
       });
     }
   }
-  return { blocks: allBlocks, headerMap };
+  return { blocks: allBlocks, headerMap, footerMap, lineCountMap };
 }
 
 function resolveScanRoot(projectPath, subPath) {
@@ -1314,16 +1619,19 @@ async function expandSkeletonCluster(symbols, projectPath, budget = ${budgetToke
   try {
     const { root, scanRoot } = resolveScanRoot(projectPath, subPath);
     const wanted = new Set((symbols || []).map((s) => String(s).toLowerCase()));
-    const { blocks, headerMap } = await collectProjectBlocks(root, scanRoot);
+    const { blocks, headerMap, footerMap, lineCountMap } = await collectProjectBlocks(root, scanRoot);
     let used = 0;
     const expanded = [];
     const expandedFiles = new Set();
     const fullStart1EndLine = new Map();
+    const coveredRangesByFile = new Map();
     for (const b of blocks) {
       const match = wanted.has(b.name.toLowerCase()) || [...wanted].some((w) => b.name.toLowerCase().includes(w) || b.rel.toLowerCase().includes(w));
       if (match && used + b.rawTk <= budget) {
         used += b.rawTk;
         expandedFiles.add(b.rel);
+        if (!coveredRangesByFile.has(b.rel)) coveredRangesByFile.set(b.rel, []);
+        coveredRangesByFile.get(b.rel).push([b.startLine, b.endLine]);
         if (b.startLine === 1) {
           fullStart1EndLine.set(b.rel, Math.max(fullStart1EndLine.get(b.rel) || 0, b.endLine));
         }
@@ -1331,14 +1639,30 @@ async function expandSkeletonCluster(symbols, projectPath, budget = ${budgetToke
       }
     }
     const headerChunks = [];
+    const headerEndByFile = new Map();
     for (const rel of expandedFiles) {
       const hdr = headerMap.get(rel);
       if (!hdr) continue;
       if ((fullStart1EndLine.get(rel) || 0) >= hdr.endLine) continue;
+      headerEndByFile.set(rel, hdr.endLine);
       headerChunks.push(\`// [\${rel}:1-\${hdr.endLine}] (file header)\\n\${hdr.header}\`);
     }
+    const footerChunks = [];
+    for (const rel of expandedFiles) {
+      const ftr = footerMap.get(rel);
+      if (!ftr) continue;
+      const ranges = coveredRangesByFile.get(rel) || [];
+      const totalLines = lineCountMap.get(rel) || 0;
+      if (ranges.some(([s, e]) => s <= 1 && e >= totalLines)) continue;
+      const hdrEnd = headerEndByFile.get(rel) || 0;
+      const uncovered = ftr.chunks.filter((c) => c.startLine > hdrEnd && !ranges.some(([s, e]) => c.startLine >= s && c.endLine <= e));
+      if (uncovered.length > 0) {
+        footerChunks.push(\`// [\${rel}:\${uncovered[0].startLine}-\${uncovered[uncovered.length - 1].endLine}] (file footer)\\n\${uncovered.map((c) => c.text).join('\\n')}\`);
+      }
+    }
     const hdrTag = headerChunks.length > 0 ? \`\\n<file_headers>\\n\${headerChunks.join('\\n\\n')}\\n</file_headers>\` : '';
-    return \`<skeleton_expansion root="\${root}" subPath="\${subPath || ''}" expanded="\${expanded.length}" used="\${used}">\${hdrTag}\\n\${expanded.join('\\n\\n')}\\n</skeleton_expansion>\`;
+    const ftrTag = footerChunks.length > 0 ? \`\\n<file_footers>\\n\${footerChunks.join('\\n\\n')}\\n</file_footers>\` : '';
+    return \`<skeleton_expansion root="\${root}" subPath="\${subPath || ''}" expanded="\${expanded.length}" used="\${used}">\${hdrTag}\\n\${expanded.join('\\n\\n')}\${ftrTag}\\n</skeleton_expansion>\`;
   } catch (err) {
     return \`Error: \${err.message}\`;
   }
@@ -1348,7 +1672,7 @@ async function sliceProject(query, projectPath, budget = ${budgetTokens}, autoEx
   try {
     const { root, scanRoot } = resolveScanRoot(projectPath, subPath);
     const terms = expandQueryTerms(String(query));
-    const { blocks, headerMap } = await collectProjectBlocks(root, scanRoot);
+    const { blocks, headerMap, footerMap, lineCountMap } = await collectProjectBlocks(root, scanRoot);
     const totalBlocks = Math.max(1, blocks.length);
     const termDF = {};
     for (const t of terms) {
@@ -1378,13 +1702,20 @@ async function sliceProject(query, projectPath, budget = ${budgetTokens}, autoEx
       return { ...b, score };
     }).sort((a, b) => b.score - a.score);
 
-    // 構建專案 SymbolMap 與基於單字邊界正則 (\\bname\\s*\\() 的真實函式呼叫依賴圖 (True Call Graph)
+    // 構建專案 SymbolMap 與真實依賴圖 (True Call Graph + Constants)
     const symbolMap = new Map();
+    const constSymbolNames = new Set();
     for (let idx = 0; idx < allBlocks.length; idx++) {
       const b = allBlocks[idx];
       if (b.name && b.kind !== 'module' && !CONTROL_WORDS.has(b.name)) {
-        if (!symbolMap.has(b.name)) symbolMap.set(b.name, []);
-        symbolMap.get(b.name).push(idx);
+        const names = (b.kind === 'const' && b.name.includes(','))
+          ? b.name.split(',').map((s) => s.trim()).filter(Boolean)
+          : [b.name];
+        for (const sn of names) {
+          if (!symbolMap.has(sn)) symbolMap.set(sn, []);
+          symbolMap.get(sn).push(idx);
+          if (b.kind === 'const') constSymbolNames.add(sn);
+        }
       }
     }
 
@@ -1397,7 +1728,8 @@ async function sliceProject(query, projectPath, budget = ${budgetTokens}, autoEx
         if (sym === caller.name) continue;
         if (maskedCaller.includes(sym)) {
           const esc = sym.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
-          const callRe = new RegExp('\\\\b' + esc + '\\\\s*\\\\(', 'm');
+          const isConstRef = constSymbolNames.has(sym) && sym.length >= 3;
+          const callRe = isConstRef ? new RegExp('\\\\b' + esc + '\\\\b', 'm') : new RegExp('\\\\b' + esc + '\\\\s*\\\\(', 'm');
           if (callRe.test(maskedCaller)) {
             for (const t of (symbolMap.get(sym) || [])) {
               callAdj[i].add(t);
@@ -1410,11 +1742,13 @@ async function sliceProject(query, projectPath, budget = ${budgetTokens}, autoEx
 
     // 計算自頂部修改重點 (Focal) 出發的 1 層 (1-hop) 與 2 層 (2-hop) 關聯距離
     const focalIndices = [];
+    const focalFiles = new Set();
     const hopDistances = new Map();
     for (let i = 0; i < allBlocks.length; i++) {
       if (allBlocks[i].score > 0 && focalIndices.length < 3) {
         focalIndices.push(i);
         hopDistances.set(i, 0);
+        focalFiles.add(allBlocks[i].rel);
       }
     }
 
@@ -1438,7 +1772,13 @@ async function sliceProject(query, projectPath, budget = ${budgetTokens}, autoEx
     const focalNames = new Set();
     const includedIds = new Set();
     const includedFiles = new Set();
+    const partialFiles = new Set();
     const fullStart1EndLine = new Map();
+    const coveredRangesByFile = new Map();
+    const addCoveredRange = (rel, s, e) => {
+      if (!coveredRangesByFile.has(rel)) coveredRangesByFile.set(rel, []);
+      coveredRangesByFile.get(rel).push([s, e]);
+    };
     const candidateItems = [];
     const dirBudgetUsed = {};
     const maxDirBudget = budget * 0.65;
@@ -1456,22 +1796,30 @@ async function sliceProject(query, projectPath, budget = ${budgetTokens}, autoEx
         focalNames.add(b.name);
         includedIds.add(b.rel + ':' + b.name + '@' + b.startLine);
         includedFiles.add(b.rel);
+        addCoveredRange(b.rel, b.startLine, b.endLine);
         if (b.startLine === 1) {
           fullStart1EndLine.set(b.rel, Math.max(fullStart1EndLine.get(b.rel) || 0, b.endLine));
         }
         fullChunks.push(\`// [\${b.rel}:\${b.startLine}-\${b.endLine}] [\${b.parserMode}]\\n\${b.full}\`);
       } else if (used + b.skelTk <= budget && curDir + b.skelTk <= maxDirBudget) {
-        const linked = (hop !== undefined && hop <= ${maxHops}) || b.score > 0;
+        const sameFileConst = b.kind === 'const' && (b.exported || /^[A-Z][A-Z0-9_]+$/.test(b.name)) && b.lineCount <= 25 && focalFiles.has(b.rel);
+        const linked = (hop !== undefined && hop <= ${maxHops}) || b.score > 0 || sameFileConst;
         if (linked || i < 12) {
           used += b.skelTk;
           dirBudgetUsed[topDir] = curDir + b.skelTk;
           skelCandidates.push({ ...b, linked, hop: hop ?? null });
           includedIds.add(b.rel + ':' + b.name + '@' + b.startLine);
           includedFiles.add(b.rel);
+          partialFiles.add(b.rel);
+          if (b.skeleton === b.full) {
+            addCoveredRange(b.rel, b.startLine, b.endLine);
+          }
         } else {
+          partialFiles.add(b.rel);
           candidateItems.push(b);
         }
       } else {
+        partialFiles.add(b.rel);
         candidateItems.push(b);
       }
     }
@@ -1488,6 +1836,7 @@ async function sliceProject(query, projectPath, budget = ${budgetTokens}, autoEx
         used += delta;
         dirBudgetUsed[topDir] = curDir + delta;
         autoExpandedNames.push(item.name);
+        addCoveredRange(item.rel, item.startLine, item.endLine);
         if (item.startLine === 1) {
           fullStart1EndLine.set(item.rel, Math.max(fullStart1EndLine.get(item.rel) || 0, item.endLine));
         }
@@ -1499,13 +1848,31 @@ async function sliceProject(query, projectPath, budget = ${budgetTokens}, autoEx
     }
 
     const headerChunks = [];
+    const headerEndByFile = new Map();
     for (const rel of includedFiles) {
       const hdr = headerMap.get(rel);
       if (!hdr) continue;
       if ((fullStart1EndLine.get(rel) || 0) >= hdr.endLine) continue;
+      headerEndByFile.set(rel, hdr.endLine);
       headerChunks.push(\`// [\${rel}:1-\${hdr.endLine}] (file header)\\n\${hdr.header}\`);
     }
     const headerTag = headerChunks.length > 0 ? \`\\n<file_headers>\\n\${headerChunks.join('\\n\\n')}\\n</file_headers>\` : '';
+
+    const footerChunks = [];
+    for (const rel of includedFiles) {
+      const ftr = footerMap.get(rel);
+      if (!ftr) continue;
+      const ranges = coveredRangesByFile.get(rel) || [];
+      const totalLines = lineCountMap.get(rel) || 0;
+      const wholeFileCovered = ranges.some(([s, e]) => s <= 1 && e >= totalLines);
+      if (!partialFiles.has(rel) && wholeFileCovered) continue;
+      const hdrEnd = headerEndByFile.get(rel) || 0;
+      const uncovered = ftr.chunks.filter((c) => c.startLine > hdrEnd && !ranges.some(([s, e]) => c.startLine >= s && c.endLine <= e));
+      if (uncovered.length > 0) {
+        footerChunks.push(\`// [\${rel}:\${uncovered[0].startLine}-\${uncovered[uncovered.length - 1].endLine}] (file footer)\\n\${uncovered.map((c) => c.text).join('\\n')}\`);
+      }
+    }
+    const footerTag = footerChunks.length > 0 ? \`\\n<file_footers>\\n\${footerChunks.join('\\n\\n')}\\n</file_footers>\` : '';
 
     const omitted = candidateItems.filter(b => b.score > 0 && !includedIds.has(b.rel + ':' + b.name + '@' + b.startLine)).slice(0, 3);
     const omittedTag = omitted.length > 0
@@ -1514,7 +1881,7 @@ async function sliceProject(query, projectPath, budget = ${budgetTokens}, autoEx
 
     const expandTag = autoExpandedNames.length > 0 ? \` autoExpanded="\${autoExpandedNames.join(',')}"\` : '';
     const subPathTag = subPath ? \` subPath="\${subPath}"\` : '';
-    return \`<context_slice root="\${root}" version="${SCRIPT_VERSION}"\${subPathTag} budget="\${budget}" used="\${used}"\${expandTag}>\${headerTag}\\n<skeletons>\\n\${finalSkelChunks.join('\\n')}\\n</skeletons>\\n<focal>\\n\${fullChunks.join('\\n\\n')}\\n</focal>\${omittedTag}\\n</context_slice>\`;
+    return \`<context_slice root="\${root}" version="${SCRIPT_VERSION}"\${subPathTag} budget="\${budget}" used="\${used}"\${expandTag}>\${headerTag}\\n<skeletons>\\n\${finalSkelChunks.join('\\n')}\\n</skeletons>\\n<focal>\\n\${fullChunks.join('\\n\\n')}\\n</focal>\${footerTag}\${omittedTag}\\n</context_slice>\`;
   } catch (err) {
     return \`Error: \${err.message}\`;
   }

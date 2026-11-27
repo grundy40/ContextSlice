@@ -372,6 +372,109 @@ function buildTsJsClassSkeleton(
   return `${prefix}${headerLine} {\n${sigLines.join('\n')}\n}`;
 }
 
+/**
+ * Scans balanced parentheses, brackets, and braces across lines (ignoring comments and strings)
+ * to determine the true end line index (0-based) of a top-level constant or export assignment.
+ */
+function findStatementEndLine(
+  lines: string[],
+  startIdx: number,
+  mode: 'ts' | 'py' | 'go' | 'rs',
+): number {
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let braceDepth = 0;
+  let inBlockComment = false;
+  let pyTripleQuote: string | null = null;
+  const maxScan = Math.min(lines.length - 1, startIdx + 120);
+
+  for (let j = startIdx; j <= maxScan; j++) {
+    const raw = lines[j];
+    const len = raw.length;
+    let k = 0;
+
+    while (k < len) {
+      const ch = raw[k];
+      const next = raw[k + 1];
+      const next3 = mode === 'py' ? raw.slice(k, k + 3) : '';
+
+      if (pyTripleQuote) {
+        if (next3 === pyTripleQuote) {
+          pyTripleQuote = null;
+          k += 3;
+          continue;
+        }
+        k++;
+        continue;
+      }
+
+      if (inBlockComment) {
+        if (ch === '*' && next === '/') {
+          inBlockComment = false;
+          k += 2;
+          continue;
+        }
+        k++;
+        continue;
+      }
+
+      if (mode === 'py' && ch === '#') break;
+      if (mode !== 'py' && ch === '/' && next === '/') break;
+      if (mode !== 'py' && ch === '/' && next === '*') {
+        inBlockComment = true;
+        k += 2;
+        continue;
+      }
+
+      if (mode === 'py' && (next3 === '"""' || next3 === "'''")) {
+        pyTripleQuote = next3;
+        k += 3;
+        continue;
+      }
+
+      if (ch === '"' || ch === "'" || (mode === 'ts' && ch === '`') || (mode === 'go' && ch === '`')) {
+        const quote = ch;
+        k++;
+        while (k < len) {
+          if (quote !== '`' && raw[k] === '\\') {
+            k += 2;
+            continue;
+          }
+          if (raw[k] === quote) {
+            k++;
+            break;
+          }
+          k++;
+        }
+        continue;
+      }
+
+      if (ch === '(') parenDepth++;
+      else if (ch === ')') parenDepth = Math.max(0, parenDepth - 1);
+      else if (ch === '[') bracketDepth++;
+      else if (ch === ']') bracketDepth = Math.max(0, bracketDepth - 1);
+      else if (ch === '{') braceDepth++;
+      else if (ch === '}') braceDepth = Math.max(0, braceDepth - 1);
+
+      k++;
+    }
+
+    if (
+      !inBlockComment &&
+      !pyTripleQuote &&
+      parenDepth <= 0 &&
+      bracketDepth <= 0 &&
+      braceDepth <= 0
+    ) {
+      const trimmedEnd = raw.trimEnd();
+      if (trimmedEnd.endsWith('\\')) continue;
+      if (trimmedEnd.endsWith('=') && !trimmedEnd.endsWith('=>')) continue;
+      return j;
+    }
+  }
+  return maxScan;
+}
+
 function parseTsJsSymbols(file: CodeFile): AstSymbolNode[] {
   const { content, id: fileId, path: filePath } = file;
   const lines = content.split('\n');
@@ -409,8 +512,6 @@ function parseTsJsSymbols(file: CodeFile): AstSymbolNode[] {
     let endLine = declLine;
     const searchSlice = content.slice(matchStart);
     const firstBraceRel = searchSlice.indexOf('{');
-    const firstSemiRel = searchSlice.indexOf(';');
-    const firstNewlineRel = searchSlice.indexOf('\n');
 
     let hasBlock = false;
     let blockOpenAbs = -1;
@@ -419,27 +520,33 @@ function parseTsJsSymbols(file: CodeFile): AstSymbolNode[] {
       // Type alias might be single line or multi-line object type
       const eqRel = searchSlice.indexOf('=');
       const afterEq = eqRel !== -1 ? searchSlice.slice(eqRel + 1).trimStart() : '';
-      if (afterEq.startsWith('{') && firstBraceRel !== -1) {
+      const typeBraceRel = eqRel !== -1 ? searchSlice.indexOf('{', eqRel) : -1;
+      if (afterEq.startsWith('{') && typeBraceRel !== -1) {
         hasBlock = true;
-        blockOpenAbs = matchStart + firstBraceRel;
+        blockOpenAbs = matchStart + typeBraceRel;
       } else {
-        // Find terminating semicolon or newline
-        const semi = searchSlice.indexOf(';');
-        const endRel = semi !== -1 ? semi : firstNewlineRel !== -1 ? firstNewlineRel : searchSlice.length - 1;
-        endLine = getLineNumberAt(content, matchStart + endRel);
+        endLine = findStatementEndLine(lines, declLine - 1, 'ts') + 1;
       }
     } else if (keyword === 'const' || keyword === 'let') {
-      // Check if arrow function or object with brace before semicolon
-      const eqIdx = searchSlice.indexOf('=');
-      const arrowIdx = searchSlice.indexOf('=>');
-      if (arrowIdx !== -1 && (firstSemiRel === -1 || arrowIdx < firstSemiRel + 80)) {
+      const stmtEndIdx = findStatementEndLine(lines, declLine - 1, 'ts');
+      endLine = stmtEndIdx + 1;
+      const stmtText = lines.slice(declLine - 1, endLine).join('\n');
+      const arrowIdx = stmtText.indexOf('=>');
+      if (arrowIdx !== -1) {
         kind = 'function';
-      }
-      if (firstBraceRel !== -1 && (firstSemiRel === -1 || firstBraceRel < firstSemiRel)) {
-        hasBlock = true;
-        blockOpenAbs = matchStart + firstBraceRel;
-      } else if (firstSemiRel !== -1) {
-        endLine = getLineNumberAt(content, matchStart + firstSemiRel);
+        const arrowBraceRel = stmtText.indexOf('{', arrowIdx);
+        if (arrowBraceRel !== -1) {
+          hasBlock = true;
+          blockOpenAbs = matchStart + arrowBraceRel;
+        }
+      } else {
+        const eqIdx = stmtText.indexOf('=');
+        const afterEq = eqIdx !== -1 ? stmtText.slice(eqIdx + 1).trimStart() : '';
+        const objBraceRel = eqIdx !== -1 ? stmtText.indexOf('{', eqIdx) : -1;
+        if (afterEq.startsWith('{') && objBraceRel !== -1) {
+          hasBlock = true;
+          blockOpenAbs = matchStart + objBraceRel;
+        }
       }
     } else if (firstBraceRel !== -1) {
       hasBlock = true;
@@ -470,6 +577,8 @@ function parseTsJsSymbols(file: CodeFile): AstSymbolNode[] {
     } else if (kind === 'class') {
       const headerLine = content.slice(matchStart, blockOpenAbs).trim();
       skeletonCode = buildTsJsClassSkeleton(fullCode, headerLine, doc);
+    } else if (kind === 'const' && lineCount <= 10) {
+      skeletonCode = fullCode;
     } else if (hasBlock && lineCount > 4) {
       const headerOnly = content.slice(matchStart, blockOpenAbs).trim();
       const foldedLines = Math.max(1, lineCount - 2);
@@ -550,6 +659,37 @@ function parseTsJsSymbols(file: CodeFile): AstSymbolNode[] {
     }
   }
 
+  // Also index col-0 export default <expr> and CommonJS module.exports = ...
+  const tailExportRe = /^(?:export\s+(default)\s+(?!(?:async\s+)?(?:function|class|abstract\s+class|interface)\b)|(module\.exports)\s*=)/gm;
+  while ((match = tailExportRe.exec(content)) !== null) {
+    const declLine = getLineNumberAt(content, match.index);
+    if (isCovered(declLine)) continue;
+    const endLine = findStatementEndLine(lines, declLine - 1, 'ts') + 1;
+    const { doc, docStartLine } = extractLeadingDoc(lines, declLine);
+    coveredRanges.push([docStartLine, endLine]);
+    const name = match[1] ? 'default' : 'module.exports';
+    const fullCode = lines.slice(docStartLine - 1, endLine).join('\n');
+    const lineCount = endLine - docStartLine + 1;
+    const skeletonCode =
+      lineCount <= 10
+        ? fullCode
+        : `${lines[declLine - 1]}\n  /* ... ${lineCount - 1} lines folded */`;
+    nodes.push(
+      makeAstNode({
+        file,
+        name,
+        kind: 'const',
+        exported: true,
+        startLine: docStartLine,
+        endLine,
+        fullCode,
+        skeletonCode,
+        docComment: doc,
+      }),
+    );
+  }
+
+  nodes.sort((a, b) => a.startLine - b.startLine);
   return nodes;
 }
 
@@ -561,52 +701,83 @@ function parsePythonSymbols(file: CodeFile): AstSymbolNode[] {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const match = line.match(/^(async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(\([^)]*\))?.*:/);
-    if (!match) continue;
-    const kind: SymbolKind = match[1] === 'class' ? 'class' : 'function';
-    const name = match[2];
-    const startLine = i + 1;
+    if (match) {
+      const kind: SymbolKind = match[1] === 'class' ? 'class' : 'function';
+      const name = match[2];
+      const startLine = i + 1;
 
-    let endLine = startLine;
-    for (let j = i + 1; j < lines.length; j++) {
-      const next = lines[j];
-      if (next.trim() === '' || /^\s+/.test(next)) {
-        endLine = j + 1;
-      } else {
-        break;
+      let endLine = startLine;
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j];
+        if (next.trim() === '' || /^\s+/.test(next)) {
+          endLine = j + 1;
+        } else {
+          break;
+        }
       }
-    }
-    while (endLine > startLine && lines[endLine - 1].trim() === '') {
-      endLine--;
+      while (endLine > startLine && lines[endLine - 1].trim() === '') {
+        endLine--;
+      }
+
+      const fullCode = lines.slice(startLine - 1, endLine).join('\n');
+      const lineCount = endLine - startLine + 1;
+      const refs = extractIdentifiers(fullCode, name);
+      const skeletonCode =
+        lineCount > 3
+          ? `${line}\n    # ... ${lineCount - 1} lines folded`
+          : fullCode;
+
+      nodes.push({
+        id: `${fileId}::${name}@${startLine}`,
+        fileId,
+        filePath,
+        name,
+        qualifiedName: `${filePath.split('/').pop()} › ${name}`,
+        kind,
+        exported: !name.startsWith('_'),
+        startLine,
+        endLine,
+        lineCount,
+        fullCode,
+        skeletonCode,
+        rawTokens: estimateTokens(fullCode),
+        skeletonTokens: estimateTokens(skeletonCode),
+        mapTokens: estimateTokens(`${filePath}:${startLine} ${kind} ${name}`),
+        docComment: '',
+        referencedIdentifiers: refs,
+      });
+      i = endLine - 1;
+      continue;
     }
 
-    const fullCode = lines.slice(startLine - 1, endLine).join('\n');
-    const lineCount = endLine - startLine + 1;
-    const refs = extractIdentifiers(fullCode, name);
-    const skeletonCode =
-      lineCount > 3
-        ? `${line}\n    # ... ${lineCount - 1} lines folded`
-        : fullCode;
+    // Col-0 Python module-level UPPER_SNAKE_CASE constants & __all__ / __version__
+    const constMatch = line.match(/^([A-Z][A-Z0-9_]+|__all__|__version__)\s*(?::\s*[^=\n]+)?=\s*(?!=)/);
+    if (constMatch) {
+      const name = constMatch[1];
+      const declLine = i + 1;
+      const stmtEndIdx = findStatementEndLine(lines, i, 'py');
+      const endLine = stmtEndIdx + 1;
+      const { doc, docStartLine } = extractLeadingDoc(lines, declLine);
+      const fullCode = lines.slice(docStartLine - 1, endLine).join('\n');
+      const lineCount = endLine - docStartLine + 1;
+      const skeletonCode =
+        lineCount <= 8 ? fullCode : `${doc ? doc + '\n' : ''}${line}\n    # ... ${lineCount - 1} lines folded`;
 
-    nodes.push({
-      id: `${fileId}::${name}@${startLine}`,
-      fileId,
-      filePath,
-      name,
-      qualifiedName: `${filePath.split('/').pop()} › ${name}`,
-      kind,
-      exported: !name.startsWith('_'),
-      startLine,
-      endLine,
-      lineCount,
-      fullCode,
-      skeletonCode,
-      rawTokens: estimateTokens(fullCode),
-      skeletonTokens: estimateTokens(skeletonCode),
-      mapTokens: estimateTokens(`${filePath}:${startLine} ${kind} ${name}`),
-      docComment: '',
-      referencedIdentifiers: refs,
-    });
-    i = endLine - 1;
+      nodes.push(
+        makeAstNode({
+          file,
+          name,
+          kind: 'const',
+          exported: !name.startsWith('_') || name === '__all__',
+          startLine: docStartLine,
+          endLine,
+          fullCode,
+          skeletonCode,
+          docComment: doc,
+        }),
+      );
+      i = stmtEndIdx;
+    }
   }
 
   return nodes;
@@ -653,6 +824,8 @@ function parseGoSymbols(file: CodeFile): AstSymbolNode[] {
   const { content, id: fileId, path: filePath } = file;
   const lines = content.split('\n');
   const nodes: AstSymbolNode[] = [];
+  const covered: Array<[number, number]> = [];
+  const isCovered = (ln: number) => covered.some(([s, e]) => ln >= s && ln <= e);
 
   // Match Go functions, receiver methods, and type struct/interface definitions
   const goDeclRe = /^(func\s+(?:\([^)]+\)\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(|type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(struct|interface)\b)/gm;
@@ -661,6 +834,7 @@ function parseGoSymbols(file: CodeFile): AstSymbolNode[] {
   while ((match = goDeclRe.exec(content)) !== null) {
     const matchStart = match.index;
     const declLine = getLineNumberAt(content, matchStart);
+    if (isCovered(declLine)) continue;
     const isFunc = match[0].startsWith('func');
     let name = isFunc ? match[2] : match[3];
     let kind: SymbolKind = isFunc ? 'function' : match[4] === 'interface' ? 'interface' : 'type';
@@ -684,6 +858,7 @@ function parseGoSymbols(file: CodeFile): AstSymbolNode[] {
     }
 
     const { doc, docStartLine } = extractLeadingDoc(lines, declLine);
+    covered.push([docStartLine, endLine]);
     const fullCode = lines.slice(docStartLine - 1, endLine).join('\n');
     const lineCount = endLine - docStartLine + 1;
     const shortName = name.includes('.') ? name.split('.').pop()! : name;
@@ -721,6 +896,81 @@ function parseGoSymbols(file: CodeFile): AstSymbolNode[] {
     });
   }
 
+  // Top-level Go const / var blocks and single-item constant/var declarations
+  for (let i = 0; i < lines.length; i++) {
+    const declLine = i + 1;
+    if (isCovered(declLine)) continue;
+    const raw = lines[i];
+
+    const grpMatch = raw.match(/^(const|var)\s*\(/);
+    if (grpMatch) {
+      const endIdx = findStatementEndLine(lines, i, 'go');
+      const endLine = endIdx + 1;
+      const { doc, docStartLine } = extractLeadingDoc(lines, declLine);
+      covered.push([docStartLine, endLine]);
+
+      const innerNames: string[] = [];
+      for (let j = i + 1; j <= endIdx; j++) {
+        const im = lines[j].match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\b/);
+        if (im && im[1] !== '_' && im[1] !== 'iota') {
+          innerNames.push(im[1]);
+        }
+      }
+      const name = innerNames.length > 0 ? innerNames.slice(0, 4).join(', ') : `${grpMatch[1]}_block`;
+      const fullCode = lines.slice(docStartLine - 1, endLine).join('\n');
+      const lineCount = endLine - docStartLine + 1;
+      const skeletonCode =
+        lineCount <= 12
+          ? fullCode
+          : `${doc ? doc + '\n' : ''}${raw}\n\t// ... ${lineCount - 2} lines folded\n)`;
+      nodes.push(
+        makeAstNode({
+          file,
+          name,
+          kind: 'const',
+          exported: innerNames.some((n) => /^[A-Z]/.test(n)),
+          startLine: docStartLine,
+          endLine,
+          fullCode,
+          skeletonCode,
+          docComment: doc,
+        }),
+      );
+      i = endIdx;
+      continue;
+    }
+
+    const singleMatch = raw.match(/^(const|var)\s+([A-Za-z_][A-Za-z0-9_]*)\b/);
+    if (singleMatch) {
+      const name = singleMatch[2];
+      const endIdx = findStatementEndLine(lines, i, 'go');
+      const endLine = endIdx + 1;
+      const { doc, docStartLine } = extractLeadingDoc(lines, declLine);
+      covered.push([docStartLine, endLine]);
+      const fullCode = lines.slice(docStartLine - 1, endLine).join('\n');
+      const lineCount = endLine - docStartLine + 1;
+      const skeletonCode =
+        lineCount <= 8
+          ? fullCode
+          : `${doc ? doc + '\n' : ''}${raw}\n\t// ... ${lineCount - 1} lines folded`;
+      nodes.push(
+        makeAstNode({
+          file,
+          name,
+          kind: 'const',
+          exported: /^[A-Z]/.test(name),
+          startLine: docStartLine,
+          endLine,
+          fullCode,
+          skeletonCode,
+          docComment: doc,
+        }),
+      );
+      i = endIdx;
+    }
+  }
+
+  nodes.sort((a, b) => a.startLine - b.startLine);
   return nodes;
 }
 
@@ -1263,6 +1513,32 @@ function parseRustSymbols(file: CodeFile): AstSymbolNode[] {
       }),
     );
   }
+
+  // Top-level Rust const / static declarations
+  const rsConstRe = /^(?:pub(?:\([^)]+\))?\s+)?(?:const|static)\s+([A-Z][A-Z0-9_]*)\b/gm;
+  while ((m = rsConstRe.exec(content)) !== null) {
+    const declLine = getLineNumberAt(content, m.index);
+    const endLine = findStatementEndLine(lines, declLine - 1, 'rs') + 1;
+    const { doc, docStartLine } = extractLeadingDoc(lines, declLine);
+    const fullCode = lines.slice(docStartLine - 1, endLine).join('\n');
+    const lineCount = endLine - docStartLine + 1;
+    const skeletonCode =
+      lineCount <= 8 ? fullCode : `${doc ? doc + '\n' : ''}${lines[declLine - 1]}\n  /* ... ${lineCount - 1} lines folded */`;
+    nodes.push(
+      makeAstNode({
+        file,
+        name: m[1],
+        kind: 'const',
+        exported: m[0].startsWith('pub'),
+        startLine: docStartLine,
+        endLine,
+        fullCode,
+        skeletonCode,
+        docComment: doc,
+      }),
+    );
+  }
+  nodes.sort((a, b) => a.startLine - b.startLine);
   return nodes;
 }
 
@@ -1767,11 +2043,17 @@ export function parseWorkspaceFiles(
   const nodesByName = new Map<string, AstSymbolNode[]>();
 
   for (const node of nodes) {
-    // Index by plain name and method suffix
-    const shortName = node.name.includes('.') ? node.name.split('.').pop()! : node.name;
-    const list = nodesByName.get(shortName) ?? [];
-    list.push(node);
-    nodesByName.set(shortName, list);
+    // Index by plain name, method suffix, and individual constant names inside grouped blocks
+    const rawShort = node.name.includes('.') ? node.name.split('.').pop()! : node.name;
+    const namesToIndex =
+      node.kind === 'const' && rawShort.includes(',')
+        ? rawShort.split(',').map((s) => s.trim()).filter(Boolean)
+        : [rawShort];
+    for (const shortName of namesToIndex) {
+      const list = nodesByName.get(shortName) ?? [];
+      list.push(node);
+      nodesByName.set(shortName, list);
+    }
   }
 
   for (const src of nodes) {
