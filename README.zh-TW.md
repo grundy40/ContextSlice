@@ -1,10 +1,11 @@
-# ContextSlice Studio (`v0.3.1`)
+# ContextSlice Studio (`v0.3.2`)
 
 > **幫 AI 挑重點、省 Token 的程式結構分析與精簡工作台**  
 > 在把程式碼交給 AI 之前，先自動找出要修改的函式與上下游關聯，將其他無關細節摺疊成「只留名稱與參數的外框」，大幅縮小體積並避免上下文溢位。
 
 🌐 **Language / 語言**：[English](./README.md) · **繁體中文**
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-emerald?style=flat)](https://grundy40.github.io/ContextSlice/)
 [![GitHub Repo](https://img.shields.io/badge/GitHub-ContextSlice-blue?style=flat)](https://github.com/grundy40/ContextSlice)
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![Agensi Free Skill](https://img.shields.io/badge/Agensi-Free%20Skill-success)](https://www.agensi.io/skills/context-slice)
@@ -90,6 +91,8 @@ npm run build
 
 ## 4. 30 秒上手使用流程
 
+> 🚀 **立即線上試用（免安裝瀏覽器網頁版 Live Demo）：** [https://grundy40.github.io/ContextSlice/](https://grundy40.github.io/ContextSlice/)
+
 1. **不確定怎麼看？先點左側「新手入門引導」**：會用兩句白話快速說明左、中、右各區塊用途。
 2. **匯入你的資料夾或檔案**：點擊右上角「匯入資料夾 / 檔案」，選擇本機程式碼資料夾、多個檔案或貼上單段長程式碼即可開始分析。
    - 若資料夾內含不支援檔案、超過 1.5MB 大檔或超過瀏覽器單次 200 檔上限，上方會顯示明確提示。
@@ -114,7 +117,7 @@ npx @grundy40/contextslice "login token validation" --budget 32768
 claude mcp add --scope user context-slice -- npx -y -p @grundy40/contextslice ctxslice-mcp
 ```
 
-若偏好全域指令，可執行 `npm install -g @grundy40/contextslice` 後直接使用 `ctxslice` 與 `ctxslice-mcp`。
+若偏好全域指令，可執行 `npm install -g @grundy40/contextslice` 後直接使用 `contextslice`、`ctxslice` 與 `ctxslice-mcp`。
 
 ### 5.2 OpenCode / Pi Agent / Claude Code 通用 1-Tool MCP
 
@@ -144,11 +147,13 @@ claude mcp add --scope user context-slice -- npx -y -p @grundy40/contextslice ct
 ├── start.mjs                            # macOS / Linux / Windows 一鍵啟動腳本
 ├── package.json                         # 套件與腳本定義（含 build:cli）
 ├── LICENSE                              # MIT 開源授權
-├── .github/workflows/publish-npm.yml    # 推送 v* 標籤自動發布 npm 工作流
+├── .github/workflows/
+│   ├── deploy-pages.yml                 # 推送 main 分支自動部署 GitHub Pages 線上版
+│   └── publish-npm.yml                  # 推送 v* 標籤自動發布 npm 工作流
 ├── scripts/
 │   └── build-cli.mjs                    # 抽離產生獨立 CLI 與 MCP 執行檔腳本
 ├── packages/cli/                        # 零依賴 @grundy40/contextslice npm 套件
-│   ├── package.json                     # bin 映射設定 (ctxslice, ctxslice-mcp)
+│   ├── package.json                     # bin 映射設定 (contextslice, ctxslice, ctxslice-mcp)
 │   ├── README.md                        # npm 套件與 npx / Claude Code 英文說明
 │   └── bin/                             # 自動建置產生之單檔執行檔（已列入 .gitignore）
 └── src/
@@ -223,6 +228,11 @@ claude mcp add --scope user context-slice -- npx -y -p @grundy40/contextslice ct
 
 ## 8. 版本更新紀錄
 
+### v0.3.2（2026-11-27）
+
+- **GitHub Pages 免費線上網頁版自動部署**：於 `vite.config.ts` 設定子路徑 `base`（GitHub Actions 環境自動套用 `'/ContextSlice/'`，本機與靜態打包維持 `'./'`），並新增 `.github/workflows/deploy-pages.yml`，推送至 `main` 分支即自動建置並部署至 `https://grundy40.github.io/ContextSlice/`。
+- **補齊 `contextslice` 短指令別名並升版至 `v0.3.2`**：於 `packages/cli/package.json` 的 `"bin"` 新增 `"contextslice": "./bin/ctxslice.mjs"`（與 `ctxslice`、`ctxslice-mcp` 並存），同步將工作台與套件版號升至 `0.3.2`，並在雙語 `README` 加入線上試用（Live Demo）徽章與連結。
+
 ### v0.3.1（2026-11-27）
 
 - **零外部依賴獨立 npm 套件（`@grundy40/contextslice`）**：建立 `packages/cli/` 套件目錄（零 `dependencies`），配置 `ctxslice` 與 `ctxslice-mcp` 雙 `bin` 入口及英文版套件 `README.md`，支援 `npx @grundy40/contextslice` 即時執行與 `npx -y -p @grundy40/contextslice ctxslice-mcp` 串接 Claude Code。
@@ -284,5 +294,6 @@ claude mcp add --scope user context-slice -- npx -y -p @grundy40/contextslice ct
 
 ### 📎 相關連結
 
+- **線上網頁版試用（GitHub Pages Live Demo）**：[https://grundy40.github.io/ContextSlice/](https://grundy40.github.io/ContextSlice/)
 - **GitHub 原始碼**：[https://github.com/grundy40/ContextSlice](https://github.com/grundy40/ContextSlice)
 - **Agensi 免費技能（透過推廣連結下載）**：[https://www.agensi.io/r/GRUNDY40?to=/skills/context-slice](https://www.agensi.io/r/GRUNDY40?to=/skills/context-slice)

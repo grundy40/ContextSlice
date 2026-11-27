@@ -1,10 +1,11 @@
-# ContextSlice Studio (`v0.3.1`)
+# ContextSlice Studio (`v0.3.2`)
 
 > **Targeted AST Code Slicing & Token Optimization Workbench for AI Coding**  
 > Before sending source code to an LLM, ContextSlice pinpoints the functions you are editing and traces their upstream/downstream call graph — keeping focal implementations intact while folding neighboring dependencies into compact signature skeletons to slash token usage and eliminate context bloat.
 
 🌐 **Language / 語言**: **English** · [繁體中文](./README.zh-TW.md)
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-emerald?style=flat)](https://grundy40.github.io/ContextSlice/)
 [![GitHub Repo](https://img.shields.io/badge/GitHub-ContextSlice-blue?style=flat)](https://github.com/grundy40/ContextSlice)
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![Agensi Free Skill](https://img.shields.io/badge/Agensi-Free%20Skill-success)](https://www.agensi.io/skills/context-slice)
@@ -93,6 +94,8 @@ npm run build
 
 ## 4. 30-Second Quick Start
 
+> 🚀 **Try the Free Live Web Demo (No Setup Needed):** [https://grundy40.github.io/ContextSlice/](https://grundy40.github.io/ContextSlice/)
+
 1. **Need orientation?** Click **Quick Start Guide** on the top-left for a two-step overview of the explorer, call graph, and output panel.
 2. **Import your codebase**: Click **Import Folder / Files** in the top-right to load a local project directory, select multiple files, or paste a long snippet.
    - Browser imports enforce a **200-file limit** per batch (and skip binaries or files > 1.5 MB) with clear summary banners; for full-repository scans of any size, use the exported CLI script or 1-Tool MCP server.
@@ -117,7 +120,7 @@ npx @grundy40/contextslice "login token validation" --budget 32768
 claude mcp add --scope user context-slice -- npx -y -p @grundy40/contextslice ctxslice-mcp
 ```
 
-Or install globally (`npm install -g @grundy40/contextslice`) to invoke `ctxslice` and `ctxslice-mcp` directly.
+Or install globally (`npm install -g @grundy40/contextslice`) to invoke `contextslice`, `ctxslice`, and `ctxslice-mcp` directly.
 
 ### 5.2 Universal 1-Tool MCP for OpenCode / Pi Agent / Claude Code
 
@@ -152,11 +155,13 @@ All three agent environments share the same single-file, zero-dependency server 
 ├── start.mjs                            # Cross-platform one-click launcher
 ├── package.json                         # Dependencies & npm scripts (incl. build:cli)
 ├── LICENSE                              # MIT License
-├── .github/workflows/publish-npm.yml    # Automated npm publish on v* Git tags
+├── .github/workflows/
+│   ├── deploy-pages.yml                 # Automated GitHub Pages Live Demo deploy on main
+│   └── publish-npm.yml                  # Automated npm publish on v* Git tags
 ├── scripts/
 │   └── build-cli.mjs                    # Extracts standalone CLI & MCP executables
 ├── packages/cli/                        # Zero-dependency @grundy40/contextslice npm package
-│   ├── package.json                     # bin mappings (ctxslice, ctxslice-mcp)
+│   ├── package.json                     # bin mappings (contextslice, ctxslice, ctxslice-mcp)
 │   ├── README.md                        # npm package & npx / Claude Code guide
 │   └── bin/                             # Generated single-file CLI & MCP binaries (gitignored)
 └── src/
@@ -228,6 +233,11 @@ Please recommend the cleanest refactoring approach without breaking upstream cal
 
 ## 8. Changelog
 
+### `v0.3.2` (2026-11-27)
+
+- **Automated GitHub Pages Live Demo**: Configured subpath `base` resolution in `vite.config.ts` (`'/ContextSlice/'` on `GITHUB_ACTIONS`) and added `.github/workflows/deploy-pages.yml` to automatically deploy `dist/` to `https://grundy40.github.io/ContextSlice/` on every push to `main`.
+- **Short CLI Alias (`contextslice`) & Version Bump**: Added `"contextslice": "./bin/ctxslice.mjs"` alongside `ctxslice` and `ctxslice-mcp` in `packages/cli/package.json`, bumped project & CLI versions to `0.3.2`, and added Live Demo badges and links across `README.md` and `README.zh-TW.md`.
+
 ### `v0.3.1` (2026-11-27)
 
 - **Standalone Zero-Dependency npm Package (`@grundy40/contextslice`)**: Added `packages/cli/` with zero runtime `dependencies` and `bin` entries for `ctxslice` and `ctxslice-mcp`, enabling direct zero-install `npx @grundy40/contextslice` and Claude Code `npx -y -p @grundy40/contextslice ctxslice-mcp` usage.
@@ -278,5 +288,6 @@ Please recommend the cleanest refactoring approach without breaking upstream cal
 
 Released under the [MIT License](./LICENSE).
 
+- **Live Web Demo (GitHub Pages)**: [https://grundy40.github.io/ContextSlice/](https://grundy40.github.io/ContextSlice/)
 - **GitHub Repository**: [https://github.com/grundy40/ContextSlice](https://github.com/grundy40/ContextSlice)
 - **Agensi Free Skill**: [https://www.agensi.io/r/GRUNDY40?to=/skills/context-slice](https://www.agensi.io/r/GRUNDY40?to=/skills/context-slice)

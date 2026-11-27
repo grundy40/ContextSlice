@@ -33,12 +33,14 @@ npx @grundy40/contextslice --version
 npx @grundy40/contextslice --help
 ```
 
-Or install globally if you prefer short commands (`ctxslice` and `ctxslice-mcp`):
+Or install globally (`npm install -g @grundy40/contextslice`) if you prefer short commands (`contextslice`, `ctxslice`, and `ctxslice-mcp`):
 
 ```bash
 npm install -g @grundy40/contextslice
-ctxslice "retry queue" --budget 32768
+contextslice "retry queue" --budget 32768
 ```
+
+Prefer a visual browser UI? Try the **Live Demo** at [https://grundy40.github.io/ContextSlice/](https://grundy40.github.io/ContextSlice/).
 
 ---
 
