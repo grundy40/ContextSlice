@@ -490,6 +490,832 @@ function buildRepositoryFileTree(fileEntries, maxTokens = 1800) {
   }
   return out;
 }
+const DOC_EXT_RE = /\.(md|mdx|rst|adoc|asciidoc)$/i;
+const DOC_PATH_RE = /(^|\/)(docs?|documentation|wiki|guides?)\/|(^|\/)(README|CHANGELOG|HISTORY|CONTRIBUTING|CHANGES|RELEASES|MIGRATION|UPGRADING|AUTHORS|NOTICE|LICENSE)([^/]*)$/i;
+const TEST_PATH_RE = /(^|\/)(tests?|__tests__|spec|specs|testing|fixtures?|benchmarks?|examples?|samples?)\/|(\.|_)(test|spec)\.[^/]+$|(^|\/)test_[^/]+\.[^/]+$/i;
+const SYNTAX_NOISE_WORDS = new Set([
+  'class', 'def', 'function', 'func', 'fn', 'struct', 'interface', 'type', 'enum',
+  'const', 'let', 'var', 'async', 'await', 'import', 'export', 'return',
+  'public', 'private', 'protected', 'static'
+]);
+
+function classifyFileRole(filePath) {
+  const norm = String(filePath || '').replace(/\\/g, '/');
+  if (DOC_EXT_RE.test(norm) || DOC_PATH_RE.test(norm)) return 'doc';
+  if (TEST_PATH_RE.test(norm)) return 'test';
+  return 'source';
+}
+
+function getQueryRoleIntents(query) {
+  const q = String(query || '').toLowerCase();
+  return {
+    wantsDocs: /\b(readme|changelog|docs|documentation|markdown|guide)\b|\.md\b|文件|說明/.test(q),
+    wantsTests: /\b(tests?|specs?|pytest|unittest|jest|vitest)\b|測試/.test(q)
+  };
+}
+
+function sliceDocWindow(content, queryTerms, radius = 16, maxTokens = 480) {
+  const lines = String(content || '').replace(/\r\n/g, '\n').split('\n');
+  if (lines.length <= 45) {
+    return {
+      windowedCode: content,
+      ranges: [[1, Math.max(1, lines.length)]],
+      tokens: estimateTokens(content)
+    };
+  }
+  const matchedLines = [];
+  if (queryTerms && queryTerms.length > 0) {
+    for (let i = 0; i < lines.length; i++) {
+      const lower = lines[i].toLowerCase();
+      if (queryTerms.some((t) => lower.includes(t))) {
+        matchedLines.push(i + 1);
+        if (matchedLines.length >= 3) break;
+      }
+    }
+  }
+  const rawRanges = matchedLines.length > 0
+    ? matchedLines.slice(0, 2).map((ln) => [Math.max(1, ln - radius), Math.min(lines.length, ln + radius)])
+    : [[1, Math.min(lines.length, 24)]];
+  const merged = mergeLineRanges(rawRanges);
+  const parts = [];
+  const usedRanges = [];
+  let accTokens = 0;
+  for (let idx = 0; idx < merged.length; idx++) {
+    const s = merged[idx][0];
+    const e = merged[idx][1];
+    const sliceLines = [];
+    let endWritten = s - 1;
+    for (let ln = s; ln <= e; ln++) {
+      const candidate = lines[ln - 1];
+      const tk = estimateTokens(candidate);
+      if (accTokens + tk > maxTokens && sliceLines.length > 0) break;
+      sliceLines.push(candidate);
+      accTokens += tk;
+      endWritten = ln;
+    }
+    if (sliceLines.length === 0) break;
+    if (idx > 0 && usedRanges.length > 0) {
+      const prevEnd = usedRanges[usedRanges.length - 1][1];
+      if (s > prevEnd + 1) parts.push('<!-- ... lines ' + (prevEnd + 1) + '-' + (s - 1) + ' omitted ... -->');
+    }
+    parts.push(sliceLines.join('\n'));
+    usedRanges.push([s, endWritten]);
+    if (accTokens >= maxTokens) break;
+  }
+  if (usedRanges.length > 0 && usedRanges[usedRanges.length - 1][1] < lines.length) {
+    parts.push('<!-- ... ' + (lines.length - usedRanges[usedRanges.length - 1][1]) + ' remaining doc lines omitted ... -->');
+  }
+  const windowedCode = parts.join('\n');
+  return {
+    windowedCode,
+    ranges: usedRanges.length > 0 ? usedRanges : [[1, Math.min(lines.length, 20)]],
+    tokens: estimateTokens(windowedCode)
+  };
+}
+
+function findPythonSignatureEndIdx(lines, startIdx) {
+  let paren = 0, bracket = 0, brace = 0;
+  const maxScan = Math.min(lines.length - 1, startIdx + 25);
+  for (let j = startIdx; j <= maxScan; j++) {
+    const raw = lines[j];
+    let k = 0;
+    while (k < raw.length) {
+      const ch = raw[k];
+      if (ch === '#') break;
+      if (ch === '"' || ch === "'") {
+        const quote = ch;
+        k++;
+        while (k < raw.length) {
+          if (raw[k] === '\\') { k += 2; continue; }
+          if (raw[k] === quote) { k++; break; }
+          k++;
+        }
+        continue;
+      }
+      if (ch === '(') paren++;
+      else if (ch === ')') paren = Math.max(0, paren - 1);
+      else if (ch === '[') bracket++;
+      else if (ch === ']') bracket = Math.max(0, bracket - 1);
+      else if (ch === '{') brace++;
+      else if (ch === '}') brace = Math.max(0, brace - 1);
+      k++;
+    }
+    const noComment = raw.replace(/#.*$/, '').trimEnd();
+    if (paren <= 0 && bracket <= 0 && brace <= 0 && noComment.endsWith(':')) return j;
+  }
+  return startIdx;
+}
+
+function findPythonBlockEndIdx(lines, sigEndIdx, baseIndent) {
+  let end = sigEndIdx;
+  let inTriple = null;
+  for (let j = sigEndIdx + 1; j < lines.length; j++) {
+    const raw = lines[j];
+    const trimmed = raw.trim();
+    if (inTriple) {
+      end = j;
+      if ((raw.split(inTriple).length - 1) % 2 === 1) inTriple = null;
+      continue;
+    }
+    if (trimmed === '') { end = j; continue; }
+    const indent = (raw.match(/^\s*/) || [''])[0].length;
+    if (indent <= baseIndent) break;
+    end = j;
+    const tm = trimmed.match(/^("""|''')/);
+    if (tm && (trimmed.split(tm[1]).length - 1) % 2 === 1) inTriple = tm[1];
+  }
+  while (end > sigEndIdx && lines[end].trim() === '') end--;
+  return end;
+}
+
+function buildPythonClassSkeleton(fullClassCode, classStartLine = 1, expandedMethodRanges = []) {
+  const lines = String(fullClassCode || '').split('\n');
+  if (lines.length <= 4) return fullClassCode;
+  let classDefRel = 0;
+  while (classDefRel < lines.length && lines[classDefRel].trimStart().startsWith('@')) classDefRel++;
+  if (classDefRel >= lines.length) return fullClassCode;
+
+  const classIndent = (lines[classDefRel].match(/^\s*/) || [''])[0].length;
+  const classSigEndRel = findPythonSignatureEndIdx(lines, classDefRel);
+  const out = [];
+  for (let i = 0; i <= classSigEndRel; i++) out.push(lines[i]);
+
+  let bodyIdx = classSigEndRel + 1;
+  while (bodyIdx < lines.length && lines[bodyIdx].trim() === '') bodyIdx++;
+  if (bodyIdx < lines.length) {
+    const t = lines[bodyIdx].trim();
+    if (t.startsWith('"""') || t.startsWith("'''")) {
+      const q = t.slice(0, 3);
+      if (t.length > 3 && t.slice(3).includes(q)) {
+        out.push(lines[bodyIdx]);
+        bodyIdx++;
+      } else {
+        let docEnd = bodyIdx;
+        for (let j = bodyIdx + 1; j < lines.length; j++) {
+          if (lines[j].includes(q)) { docEnd = j; break; }
+        }
+        if (docEnd - bodyIdx <= 4) {
+          for (let j = bodyIdx; j <= docEnd; j++) out.push(lines[j]);
+        } else {
+          out.push(lines[bodyIdx]);
+          out.push(lines[bodyIdx + 1]);
+          const indentStr = (lines[bodyIdx].match(/^\s*/) || ['    '])[0];
+          out.push(indentStr + '... (' + (docEnd - bodyIdx - 1) + ' docstring lines folded)');
+          out.push(lines[docEnd]);
+        }
+        bodyIdx = docEnd + 1;
+      }
+    }
+  }
+
+  let methodIndent = null;
+  let memberCount = 0;
+  for (let i = bodyIdx; i < lines.length; i++) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const indent = (raw.match(/^\s*/) || [''])[0].length;
+    if (indent <= classIndent) continue;
+
+    if (trimmed.startsWith('@') && (methodIndent === null || indent === methodIndent)) {
+      let k = i + 1;
+      while (k < lines.length && lines[k].trimStart().startsWith('@')) k++;
+      if (k < lines.length && /^(?:async\s+)?def\s+/.test(lines[k].trim())) {
+        if (methodIndent === null) methodIndent = indent;
+        for (let d = i; d < k; d++) out.push(lines[d]);
+        i = k - 1;
+        continue;
+      }
+    }
+
+    const dm = trimmed.match(/^(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+    if (dm && (methodIndent === null || indent === methodIndent)) {
+      methodIndent = indent;
+      memberCount++;
+      const mSigEnd = findPythonSignatureEndIdx(lines, i);
+      const mEnd = findPythonBlockEndIdx(lines, mSigEnd, indent);
+      const absStart = classStartLine + i;
+      const absEnd = classStartLine + mEnd;
+      const hit = expandedMethodRanges.find((r) => r.startLine <= absEnd && r.endLine >= absStart);
+      for (let s = i; s <= mSigEnd; s++) {
+        if (s === mSigEnd) {
+          const folded = Math.max(1, mEnd - mSigEnd);
+          const note = hit
+            ? ' # [expanded in <focal symbol="' + hit.name + '"> below]'
+            : ' # ... ' + folded + ' lines folded';
+          out.push(lines[s] + note);
+        } else {
+          out.push(lines[s]);
+        }
+      }
+      i = mEnd;
+      continue;
+    }
+
+    if (methodIndent === null || indent <= methodIndent) {
+      if (/^[A-Za-z_][A-Za-z0-9_]*\s*(?::[^=]+)?(?:=.*)?$/.test(trimmed)) {
+        out.push(raw);
+        memberCount++;
+      }
+    }
+  }
+
+  if (memberCount === 0) {
+    return lines.length > 4
+      ? lines.slice(0, classSigEndRel + 1).join('\n') + '\n    # ... ' + (lines.length - classSigEndRel - 1) + ' lines folded'
+      : fullClassCode;
+  }
+  return out.join('\n');
+}
+
+function extractPythonBlocks(lines, lineIdx) {
+  const line = lines[lineIdx];
+  const m = line.match(/^(async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b/);
+  if (!m) return null;
+
+  const kind = m[1] === 'class' ? 'class' : 'function';
+  const name = m[2];
+  let startIdx = lineIdx;
+  while (startIdx > 0 && /^@[A-Za-z_]/.test(lines[startIdx - 1])) startIdx--;
+  const startLine = startIdx + 1;
+  const sigEndIdx = findPythonSignatureEndIdx(lines, lineIdx);
+  const endIdx = findPythonBlockEndIdx(lines, sigEndIdx, 0);
+  const endLine = endIdx + 1;
+  const full = lines.slice(startIdx, endIdx + 1).join('\n');
+  const results = [];
+
+  if (kind === 'class') {
+    results.push({
+      name,
+      kind: 'class',
+      exported: !name.startsWith('_'),
+      startLine,
+      endLine,
+      full,
+      skeleton: buildPythonClassSkeleton(full, startLine)
+    });
+    let methodIndent = null;
+    for (let mIdx = sigEndIdx + 1; mIdx <= endIdx; mIdx++) {
+      const mLine = lines[mIdx];
+      const mTrimmed = mLine.trim();
+      if (!mTrimmed || mTrimmed.startsWith('#')) continue;
+      const indent = (mLine.match(/^\s*/) || [''])[0].length;
+      if (indent <= 0) continue;
+      const dm = mTrimmed.match(/^(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+      if (!dm) continue;
+      if (methodIndent === null) methodIndent = indent;
+      if (indent !== methodIndent) continue;
+      const methodName = dm[1];
+      let mStartIdx = mIdx;
+      while (
+        mStartIdx > sigEndIdx + 1 &&
+        lines[mStartIdx - 1].trimStart().startsWith('@') &&
+        (lines[mStartIdx - 1].match(/^\s*/) || [''])[0].length === indent
+      ) {
+        mStartIdx--;
+      }
+      const mSigEnd = findPythonSignatureEndIdx(lines, mIdx);
+      const mEnd = findPythonBlockEndIdx(lines, mSigEnd, indent);
+      const mFull = lines.slice(mStartIdx, mEnd + 1).join('\n');
+      const mFolded = Math.max(1, mEnd - mSigEnd);
+      const indentStr = (mLine.match(/^\s*/) || ['    '])[0];
+      const mSigLines = lines.slice(mStartIdx, mSigEnd + 1).join('\n');
+      const mSkel = mEnd - mSigEnd > 2 ? mSigLines + '\n' + indentStr + '    # ... ' + mFolded + ' lines folded' : mFull;
+      results.push({
+        name: name + '.' + methodName,
+        kind: 'method',
+        exported: !name.startsWith('_') && !methodName.startsWith('_'),
+        startLine: mStartIdx + 1,
+        endLine: mEnd + 1,
+        full: mFull,
+        skeleton: mSkel
+      });
+      mIdx = mEnd;
+    }
+  } else {
+    const sigLines = lines.slice(startIdx, sigEndIdx + 1).join('\n');
+    const skeleton = endIdx - sigEndIdx > 2 ? sigLines + '\n    # ... ' + (endIdx - sigEndIdx) + ' lines folded' : full;
+    results.push({
+      name,
+      kind: 'function',
+      exported: !name.startsWith('_'),
+      startLine,
+      endLine,
+      full,
+      skeleton
+    });
+  }
+  return { blocks: results, endIdx };
+}
+
+function assembleContextSliceXml(opts) {
+  const {
+    blocks,
+    fileEntries,
+    fileLineCounts,
+    fileHeaders,
+    fileFooters,
+    rawQuery,
+    terms,
+    budget,
+    maxHops,
+    autoExpand,
+    rootAttr,
+    version,
+    subPathTag,
+    includeParserAttr,
+    controlWords,
+    maskFn
+  } = opts;
+
+  if (!String(rawQuery || '').trim()) {
+    const treeLines = buildRepositoryFileTree(fileEntries, 1800);
+    return [
+      '<context_slice mode="file_tree_empty_query" root="' + escapeXmlAttr(rootAttr) + '" version="' + version + '"' + (subPathTag || '') + ' total_files="' + fileEntries.length + '">',
+      '  <note>Empty query received. Returning repository file tree overview; call context_slice again with specific symbol or file keywords to retrieve code.</note>',
+      '  <repository_file_tree>',
+      ...treeLines,
+      '  </repository_file_tree>',
+      '</context_slice>'
+    ].join('\n');
+  }
+
+  const roleIntents = getQueryRoleIntents(rawQuery);
+  const configWindowByKey = new Map();
+  const preparedBlocks = blocks.map((b) => {
+    const rel = b.filePath;
+    const key = rel + ':' + b.startLine;
+    const lineCount = Math.max(1, b.endLine - b.startLine + 1);
+    const isConfigFile = PLAIN_TEXT_CONFIG_EXT_RE.test(rel);
+    const isDocExt = DOC_EXT_RE.test(rel);
+    let win = null;
+    if (b.kind === 'module') {
+      if (isConfigFile && lineCount > 200) {
+        win = slicePlainTextConfigWindow(b.full, terms);
+      } else if (isDocExt && lineCount > 45) {
+        win = sliceDocWindow(b.full, terms, 16, 480);
+      }
+    }
+    if (win) configWindowByKey.set(key, win);
+    const rawTk = win ? win.tokens : (b.rawTk !== undefined ? b.rawTk : estimateTokens(b.full));
+    const skelTk = isDocExt
+      ? Math.min(b.skelTk !== undefined ? b.skelTk : estimateTokens(b.skeleton), win ? win.tokens : 480)
+      : (b.skelTk !== undefined ? b.skelTk : estimateTokens(b.skeleton));
+    return {
+      ...b,
+      filePath: rel,
+      lineCount,
+      role: classifyFileRole(rel),
+      isDocExt,
+      rawTk,
+      skelTk
+    };
+  });
+
+  const totalBlocks = Math.max(1, preparedBlocks.length);
+  const termDF = {};
+  for (const t of terms) {
+    let df = 0;
+    for (const b of preparedBlocks) {
+      if (b.name.toLowerCase().includes(t) || b.filePath.toLowerCase().includes(t) || b.full.toLowerCase().includes(t)) {
+        df++;
+      }
+    }
+    termDF[t] = Math.max(1, df);
+  }
+
+  const scored = preparedBlocks.map((b) => {
+    const nameLower = b.name.toLowerCase();
+    const shortLower = nameLower.includes('.') ? nameLower.split('.').pop() : nameLower;
+    const relLower = b.filePath.toLowerCase();
+    const lowerBody = b.full.toLowerCase();
+    let score = 0;
+    let matchedTerms = 0;
+
+    for (const t of terms) {
+      const df = termDF[t] || 1;
+      const idf = Math.log(1 + (totalBlocks / df));
+      const scarcity = (df / totalBlocks > 0.3) ? 0.35 : (df / totalBlocks > 0.15) ? 0.7 : 1.25;
+      let termScore = 0;
+      let hit = false;
+      if (nameLower === t || shortLower === t) { termScore += 48; hit = true; }
+      else if (nameLower.includes(t)) { termScore += 24; hit = true; }
+      if (relLower.includes(t)) { termScore += 12; hit = true; }
+      const bodyOcc = lowerBody.split(t).length - 1;
+      if (bodyOcc > 0) { termScore += Math.min(12, 3 * Math.log1p(bodyOcc)); hit = true; }
+      if (hit) matchedTerms++;
+      score += termScore * idf * scarcity;
+    }
+
+    if (matchedTerms >= 2) {
+      score *= 1 + 0.35 * (matchedTerms - 1);
+    }
+    if (score > 0 && (b.kind === 'function' || b.kind === 'method')) score *= 1.18;
+    else if (score > 0 && (b.kind === 'class' || b.kind === 'interface' || b.kind === 'type' || b.kind === 'struct')) score *= 1.08;
+
+    if (score > 0) {
+      if (b.role === 'doc' && !roleIntents.wantsDocs) score *= 0.10;
+      else if (b.role === 'test' && !roleIntents.wantsTests) score *= 0.20;
+      else if (b.role === 'source') score *= 1.25;
+    }
+
+    return { ...b, score };
+  }).sort((a, b) => b.score - a.score);
+
+  // Build Call Graph with shortName + common dunder guard + parent/method loop avoidance
+  const symbolMap = new Map();
+  const constSymbolNames = new Set();
+  for (let i = 0; i < scored.length; i++) {
+    const b = scored[i];
+    if (b.name && b.kind !== 'module' && !controlWords.has(b.name)) {
+      const rawShort = b.name.includes('.') ? b.name.split('.').pop() : b.name;
+      const names = (b.kind === 'const' && rawShort.includes(','))
+        ? rawShort.split(',').map((s) => s.trim()).filter(Boolean)
+        : [rawShort];
+      for (const sn of names) {
+        if (!sn || /^__.*__$/.test(sn)) continue;
+        if (!symbolMap.has(sn)) symbolMap.set(sn, []);
+        symbolMap.get(sn).push(i);
+        if (b.kind === 'const') constSymbolNames.add(sn);
+      }
+    }
+  }
+
+  const callAdj = Array.from({ length: scored.length }, () => new Set());
+  const definedNames = Array.from(symbolMap.keys());
+  for (let i = 0; i < scored.length; i++) {
+    const caller = scored[i];
+    const maskedCaller = maskFn(caller.full);
+    for (const sym of definedNames) {
+      const callerShort = caller.name.includes('.') ? caller.name.split('.').pop() : caller.name;
+      if (sym === caller.name || sym === callerShort) continue;
+      if (maskedCaller.includes(sym)) {
+        const esc = sym.replace(/[.*+?^$\x7b\x7d()|[\]\\]/g, '\\$&');
+        const isConstRef = constSymbolNames.has(sym) && sym.length >= 3;
+        const re = isConstRef ? new RegExp('\\b' + esc + '\\b', 'm') : new RegExp('\\b' + esc + '\\s*\\(', 'm');
+        if (re.test(maskedCaller)) {
+          for (const t of (symbolMap.get(sym) || [])) {
+            const target = scored[t];
+            if (caller.filePath === target.filePath && (
+              (caller.kind === 'class' && target.kind === 'method' && target.name.startsWith(caller.name + '.')) ||
+              (target.kind === 'class' && caller.kind === 'method' && caller.name.startsWith(target.name + '.'))
+            )) continue;
+            callAdj[i].add(t);
+            callAdj[t].add(i);
+          }
+        }
+      }
+    }
+  }
+
+  // Focal selection: strictly prefer source matches over docs/tests + class/method smart deduplication
+  const hasSourceMatches = scored.some((b) => b.role === 'source' && b.score > 0);
+  const eligibleIndices = [];
+  for (let i = 0; i < scored.length; i++) {
+    if (scored[i].score <= 0) continue;
+    if (hasSourceMatches && scored[i].role !== 'source') continue;
+    eligibleIndices.push(i);
+  }
+  const focalSet = new Set();
+  const promotedParentClassSet = new Set();
+  if (eligibleIndices.length > 0) {
+    const topScore = scored[eligibleIndices[0]].score;
+    const candidateIdx = eligibleIndices
+      .filter((idx, rank) => (rank < 3 && scored[idx].score >= topScore * 0.3) || scored[idx].score >= topScore * 0.55)
+      .slice(0, 5);
+    const candidateChosen = new Set();
+    for (const idx of candidateIdx) {
+      const b = scored[idx];
+      if (b.kind === 'class' && b.lineCount > 35) {
+        const childIndices = [];
+        for (let ci = 0; ci < scored.length; ci++) {
+          const c = scored[ci];
+          if (c.filePath === b.filePath && c.kind === 'method' && c.name.startsWith(b.name + '.')) {
+            const cShort = c.name.split('.').pop().toLowerCase();
+            const explicitHit = terms.some((t) => cShort === t || cShort.includes(t));
+            if (explicitHit || c.score >= b.score * 0.55) {
+              childIndices.push(ci);
+            }
+          }
+        }
+        if (childIndices.length > 0) {
+          promotedParentClassSet.add(idx);
+          for (const ci of childIndices.slice(0, 3)) candidateChosen.add(ci);
+          continue;
+        }
+      }
+      candidateChosen.add(idx);
+    }
+    for (const idx of candidateChosen) {
+      const b = scored[idx];
+      if (b.kind === 'method') {
+        const clsName = b.name.split('.')[0];
+        const hasFullParent = [...candidateChosen].some((pIdx) => {
+          const p = scored[pIdx];
+          return p && p.kind === 'class' && p.filePath === b.filePath && p.name === clsName;
+        });
+        if (hasFullParent) continue;
+      }
+      focalSet.add(idx);
+    }
+  }
+
+  // BFS from final focalSet
+  const hopDistances = new Map();
+  const focalFiles = new Set();
+  const bfsQ = [...focalSet];
+  for (const fi of bfsQ) {
+    hopDistances.set(fi, 0);
+    focalFiles.add(scored[fi].filePath);
+  }
+  let qHead = 0;
+  while (qHead < bfsQ.length) {
+    const curr = bfsQ[qHead++];
+    const curHop = hopDistances.get(curr) ?? 0;
+    if (curHop >= maxHops) continue;
+    for (const nbr of callAdj[curr]) {
+      if (!hopDistances.has(nbr)) {
+        hopDistances.set(nbr, curHop + 1);
+        bfsQ.push(nbr);
+      }
+    }
+  }
+
+  // Two-pass allocation ordering: ALL focal targets first, then promoted parent classes, then 1/2-hop source -> test -> doc
+  const roleRank = (r) => (r === 'source' ? 0 : r === 'test' ? 1 : 2);
+  const allocOrder = Array.from({ length: scored.length }, (_, i) => i).sort((a, b) => {
+    const focA = focalSet.has(a) ? 0 : 1;
+    const focB = focalSet.has(b) ? 0 : 1;
+    if (focA !== focB) return focA - focB;
+    const parA = promotedParentClassSet.has(a) ? 0 : 1;
+    const parB = promotedParentClassSet.has(b) ? 0 : 1;
+    if (parA !== parB) return parA - parB;
+    const rrA = roleRank(scored[a].role);
+    const rrB = roleRank(scored[b].role);
+    if (rrA !== rrB) return rrA - rrB;
+    const hopA = hopDistances.get(a) ?? 99;
+    const hopB = hopDistances.get(b) ?? 99;
+    if (hopA !== hopB) return hopA - hopB;
+    return scored[b].score - scored[a].score;
+  });
+
+  let remaining = budget;
+  let docBudgetUsed = 0;
+  let testBudgetUsed = 0;
+  const docBudgetCap = hasSourceMatches ? Math.min(2048, Math.floor(budget * 0.12)) : Math.min(6144, Math.floor(budget * 0.5));
+  const testBudgetCap = hasSourceMatches ? Math.min(3072, Math.floor(budget * 0.2)) : Math.floor(budget * 0.65);
+  const dirBudgetUsed = {};
+  const maxDirBudget = budget * 0.72;
+
+  const includedIds = new Set();
+  const includedFiles = [];
+  const includedFilesSet = new Set();
+  const fullStart1EndLine = new Map();
+  const coveredRangesByFile = new Map();
+  const partialFiles = new Set();
+  const selectedByFile = new Map();
+  const fullParentClassesByFile = new Map();
+  const skelCandidates = [];
+  const candidateItems = [];
+
+  const addCoveredRange = (fp, s, e) => {
+    if (!coveredRangesByFile.has(fp)) coveredRangesByFile.set(fp, []);
+    coveredRangesByFile.get(fp).push([s, e]);
+  };
+  const addSelectedBlock = (fp, entry) => {
+    if (!includedFilesSet.has(fp)) {
+      includedFilesSet.add(fp);
+      includedFiles.push(fp);
+    }
+    if (!selectedByFile.has(fp)) selectedByFile.set(fp, []);
+    selectedByFile.get(fp).push(entry);
+  };
+  const canUseRoleBudget = (role, cost) => {
+    if (role === 'doc') return docBudgetUsed + cost <= docBudgetCap;
+    if (role === 'test') return testBudgetUsed + cost <= testBudgetCap;
+    return true;
+  };
+  const addRoleBudget = (role, cost) => {
+    if (role === 'doc') docBudgetUsed += cost;
+    else if (role === 'test') testBudgetUsed += cost;
+  };
+
+  for (const idx of allocOrder) {
+    const item = scored[idx];
+    if (item.kind === 'method') {
+      const clsName = item.name.split('.')[0];
+      const fullSet = fullParentClassesByFile.get(item.filePath);
+      if (fullSet && fullSet.has(clsName)) continue;
+    }
+
+    const topDir = item.filePath.split('/')[0] || 'root';
+    const curDir = dirBudgetUsed[topDir] || 0;
+    const hop = hopDistances.get(idx);
+    const isFocal = focalSet.has(idx);
+    const isPromotedParent = promotedParentClassSet.has(idx);
+    const key = item.filePath + ':' + item.startLine;
+    const win = configWindowByKey.get(key);
+
+    if (isFocal && (item.rawTk <= remaining || remaining === budget) && (!hasSourceMatches || item.role !== 'doc')) {
+      remaining = Math.max(0, remaining - item.rawTk);
+      dirBudgetUsed[topDir] = curDir + item.rawTk;
+      addRoleBudget(item.role, item.rawTk);
+      includedIds.add(key);
+      if (item.kind === 'class') {
+        if (!fullParentClassesByFile.has(item.filePath)) fullParentClassesByFile.set(item.filePath, new Set());
+        fullParentClassesByFile.get(item.filePath).add(item.name);
+      }
+      if (win) {
+        for (const r of win.ranges) {
+          addCoveredRange(item.filePath, r[0], r[1]);
+          if (r[0] === 1) fullStart1EndLine.set(item.filePath, Math.max(fullStart1EndLine.get(item.filePath) || 0, r[1]));
+        }
+      } else {
+        addCoveredRange(item.filePath, item.startLine, item.endLine);
+        if (item.startLine === 1) fullStart1EndLine.set(item.filePath, Math.max(fullStart1EndLine.get(item.filePath) || 0, item.endLine));
+      }
+      addSelectedBlock(item.filePath, { tier: 'full', item, win, autoExpanded: false });
+    } else if (isPromotedParent && item.skelTk <= remaining) {
+      remaining -= item.skelTk;
+      dirBudgetUsed[topDir] = curDir + item.skelTk;
+      includedIds.add(key);
+      partialFiles.add(item.filePath);
+      addSelectedBlock(item.filePath, { tier: 'skeleton', item, win, hop: 1 });
+    } else if (item.skelTk <= remaining && (curDir + item.skelTk <= maxDirBudget || item.role === 'source') && canUseRoleBudget(item.role, item.skelTk)) {
+      const sameFileConst = item.kind === 'const' && (item.exported || /^[A-Z][A-Z0-9_]+$/.test(item.name)) && item.lineCount <= 25 && focalFiles.has(item.filePath);
+      const linked = (hop !== undefined && hop <= maxHops) || item.score > 0 || sameFileConst;
+      if (linked) {
+        remaining -= item.skelTk;
+        dirBudgetUsed[topDir] = curDir + item.skelTk;
+        addRoleBudget(item.role, item.skelTk);
+        includedIds.add(key);
+        partialFiles.add(item.filePath);
+        if (item.skeleton === item.full && !win) addCoveredRange(item.filePath, item.startLine, item.endLine);
+        if (autoExpand && item.role === 'source' && !isPromotedParent) {
+          skelCandidates.push({ idx, item, win, hop: hop ?? null, key });
+        } else {
+          addSelectedBlock(item.filePath, { tier: 'skeleton', item, win, hop: hop ?? null });
+        }
+      } else {
+        partialFiles.add(item.filePath);
+        candidateItems.push(item);
+      }
+    } else {
+      partialFiles.add(item.filePath);
+      candidateItems.push(item);
+    }
+  }
+
+  const autoExpandedNames = [];
+  if (autoExpand && skelCandidates.length > 0) {
+    for (const cand of skelCandidates) {
+      const it = cand.item;
+      const delta = Math.max(0, it.rawTk - it.skelTk);
+      const isComplexCluster = (cand.hop !== null || it.score > 0) && (it.lineCount >= 16 || delta >= 45);
+      const canExpandClass = it.kind !== 'class' || !it.filePath.endsWith('.py');
+      if (canExpandClass && isComplexCluster && autoExpandedNames.length < 4 && delta <= remaining) {
+        remaining -= delta;
+        autoExpandedNames.push(it.name);
+        if (cand.win) {
+          for (const r of cand.win.ranges) {
+            addCoveredRange(it.filePath, r[0], r[1]);
+            if (r[0] === 1) fullStart1EndLine.set(it.filePath, Math.max(fullStart1EndLine.get(it.filePath) || 0, r[1]));
+          }
+        } else {
+          addCoveredRange(it.filePath, it.startLine, it.endLine);
+          if (it.startLine === 1) fullStart1EndLine.set(it.filePath, Math.max(fullStart1EndLine.get(it.filePath) || 0, it.endLine));
+        }
+        addSelectedBlock(it.filePath, { tier: 'full', item: it, win: cand.win, autoExpanded: true });
+      } else {
+        addSelectedBlock(it.filePath, { tier: 'skeleton', item: it, win: cand.win, hop: cand.hop });
+      }
+    }
+  }
+
+  if (includedFiles.length === 0) {
+    const treeLines = buildRepositoryFileTree(fileEntries, 1800);
+    return [
+      '<context_slice mode="file_tree_zero_matches" root="' + escapeXmlAttr(rootAttr) + '" version="' + version + '"' + (subPathTag || '') + ' query="' + escapeXmlAttr(rawQuery) + '">',
+      '  <note>WARNING: 0 matches found for query "' + escapeXmlText(rawQuery) + '". Do NOT guess code from this file tree alone—pick valid file paths or symbol names from the tree below and call context_slice again.</note>',
+      '  <repository_file_tree>',
+      ...treeLines,
+      '  </repository_file_tree>',
+      '</context_slice>'
+    ].join('\n');
+  }
+
+  const headerByFile = new Map();
+  const headerEndByFile = new Map();
+  for (const fp of includedFiles) {
+    if (PLAIN_TEXT_CONFIG_EXT_RE.test(fp) || DOC_EXT_RE.test(fp)) continue;
+    const entries = selectedByFile.get(fp) || [];
+    const hasStart1ModuleSkel = entries.some((e) => e.tier === 'skeleton' && e.item.kind === 'module' && e.item.startLine === 1);
+    if (hasStart1ModuleSkel) continue;
+    const hdr = fileHeaders.get(fp);
+    if (!hdr) continue;
+    if ((fullStart1EndLine.get(fp) || 0) >= hdr.endLine) continue;
+    headerEndByFile.set(fp, hdr.endLine);
+    headerByFile.set(fp, hdr);
+  }
+
+  const footerByFile = new Map();
+  for (const fp of includedFiles) {
+    if (PLAIN_TEXT_CONFIG_EXT_RE.test(fp) || DOC_EXT_RE.test(fp)) continue;
+    const ftr = fileFooters.get(fp);
+    if (!ftr) continue;
+    const ranges = coveredRangesByFile.get(fp) || [];
+    const totalLines = fileLineCounts.get(fp) || 0;
+    const wholeFileCovered = ranges.some((r) => r[0] <= 1 && r[1] >= totalLines);
+    if (!partialFiles.has(fp) && wholeFileCovered) continue;
+    const hdrEnd = headerEndByFile.get(fp) || 0;
+    const uncovered = ftr.chunks.filter((c) => c.startLine > hdrEnd && !ranges.some((r) => c.startLine >= r[0] && c.endLine <= r[1]));
+    if (uncovered.length > 0) {
+      footerByFile.set(fp, {
+        startLine: uncovered[0].startLine,
+        endLine: uncovered[uncovered.length - 1].endLine,
+        text: uncovered.map((c) => c.text).join('\n'),
+        chunks: uncovered
+      });
+    }
+  }
+
+  const used = Math.max(0, budget - remaining);
+  const expandAttr = autoExpandedNames.length > 0 ? ' autoExpanded="' + escapeXmlAttr(autoExpandedNames.join(',')) + '"' : '';
+  const out = [
+    '<context_slice mode="progressive-structural-slice" root="' + escapeXmlAttr(rootAttr) + '" version="' + version + '"' + (subPathTag || '') + ' budget="' + budget + '" used="' + used + '"' + expandAttr + '>'
+  ];
+
+  for (const fp of includedFiles) {
+    const rawEntries = (selectedByFile.get(fp) || []).slice().sort((a, b) => a.item.startLine - b.item.startLine);
+    const presentClassNames = new Set(rawEntries.filter((e) => e.item.kind === 'class').map((e) => e.item.name));
+    const entries = rawEntries.filter(
+      (e) => !(e.tier === 'skeleton' && e.item.kind === 'method' && presentClassNames.has(e.item.name.split('.')[0])),
+    );
+    const fullEntries = entries.filter((e) => e.tier === 'full');
+    const hdr = headerByFile.get(fp);
+    const ftr = footerByFile.get(fp);
+    const totalLines = fileLineCounts.get(fp) || 0;
+    const shownRanges = [];
+    if (hdr) shownRanges.push([1, hdr.endLine]);
+    for (const ent of entries) {
+      if (ent.win) shownRanges.push(...ent.win.ranges);
+      else shownRanges.push([ent.item.startLine, ent.item.endLine]);
+    }
+    if (ftr) {
+      for (const c of ftr.chunks) shownRanges.push([c.startLine, c.endLine]);
+    }
+    out.push('  <file path="' + escapeXmlAttr(fp) + '" total_lines="' + totalLines + '" shown_lines="' + formatShownLines(shownRanges) + '">');
+    if (hdr) {
+      out.push('    <file_header lines="1-' + hdr.endLine + '">');
+      out.push(hdr.header);
+      out.push('    </file_header>');
+    }
+    for (const ent of entries) {
+      const it = ent.item;
+      if (ent.tier === 'full') {
+        const linesAttr = ent.win ? formatShownLines(ent.win.ranges) : (it.startLine + '-' + it.endLine);
+        const parserAttr = includeParserAttr && it.parserMode ? ' parser="' + escapeXmlAttr(it.parserMode) + '"' : '';
+        const autoAttr = ent.autoExpanded ? ' autoExpanded="true"' : '';
+        out.push('    <focal symbol="' + escapeXmlAttr(it.name) + '" lines="' + linesAttr + '"' + parserAttr + autoAttr + '>');
+        out.push(ent.win ? ent.win.windowedCode : it.full);
+        out.push('    </focal>');
+      } else {
+        let skelBody = ent.win ? ent.win.windowedCode : it.skeleton;
+        if (!ent.win && it.kind === 'class' && /\.pyw?$/i.test(fp)) {
+          const expandedChildRanges = fullEntries
+            .filter((fe) => fe.item.kind === 'method' && fe.item.name.startsWith(it.name + '.'))
+            .map((fe) => ({ name: fe.item.name, startLine: fe.item.startLine, endLine: fe.item.endLine }));
+          if (expandedChildRanges.length > 0) {
+            skelBody = buildPythonClassSkeleton(it.full, it.startLine, expandedChildRanges);
+          }
+        }
+        const hopAttr = (ent.hop !== null && ent.hop !== undefined) ? ' hop="' + ent.hop + '"' : '';
+        const skelLinesAttr = ent.win ? formatShownLines(ent.win.ranges) : (it.startLine + '-' + it.endLine);
+        out.push('    <skeleton symbol="' + escapeXmlAttr(it.name) + '" lines="' + skelLinesAttr + '"' + hopAttr + '>');
+        out.push(skelBody);
+        out.push('    </skeleton>');
+      }
+    }
+    if (ftr) {
+      out.push('    <file_footer lines="' + ftr.startLine + '-' + ftr.endLine + '">');
+      out.push(ftr.text);
+      out.push('    </file_footer>');
+    }
+    out.push('  </file>');
+  }
+
+  const omitted = candidateItems.filter((it) => it.score > 0 && !includedIds.has(it.filePath + ':' + it.startLine)).slice(0, 3);
+  if (omitted.length > 0) {
+    out.push('  <omitted_top_matches>');
+    for (const o of omitted) {
+      out.push('    <!-- Omitted: ' + o.filePath + ':' + o.startLine + ' (' + o.name + ', score: ' + o.score.toFixed(1) + ') — consider expanding -->');
+    }
+    out.push('  </omitted_top_matches>');
+  }
+
+  out.push('</context_slice>');
+  return out.join('\n');
+}
 `;
 
 const CJK_MULTILINGUAL_WORDS = {
@@ -664,7 +1490,10 @@ function expandQueryTerms(query) {
   for (const term of snapshot) {
     for (const t of bilingualLookup(term)) terms.add(t);
   }
-  return [...terms].filter(Boolean);
+  // Filter pure syntax keywords (class, def, function...) whenever non-syntax identifiers exist
+  const collected = [...terms].filter(Boolean);
+  const nonSyntax = collected.filter((t) => !SYNTAX_NOISE_WORDS.has(t));
+  return nonSyntax.length > 0 ? nonSyntax : collected;
 }
 
 const args = process.argv.slice(2);
@@ -779,20 +1608,10 @@ function extractBlocks(code, ext, fileName) {
     let m = null;
 
     if (e === '.py' || e === '.pyw') {
-      m = line.match(/^(?:async\\s+)?(def|class)\\s+([A-Za-z_][A-Za-z0-9_]*)/);
-      if (m) {
-        name = m[2];
-        kind = m[1] === 'class' ? 'class' : 'function';
-        let end = i;
-        for (let j = i + 1; j < lines.length; j++) {
-          if (lines[j].trim() === '' || /^\\s+/.test(lines[j])) end = j;
-          else break;
-        }
-        while (end > i && lines[end].trim() === '') end--;
-        const full = lines.slice(i, end + 1).join('\\n');
-        const skeleton = end - i > 2 ? \`\${lines[i]}\\n    # ... \${end - i} lines folded\` : full;
-        blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
-        i = end;
+      const pyRes = extractPythonBlocks(lines, i);
+      if (pyRes) {
+        blocks.push(...pyRes.blocks);
+        i = pyRes.endIdx;
         continue;
       }
     }
@@ -922,317 +1741,46 @@ for (const filePath of files) {
   } catch {}
 }
 
-// State A: Empty query -> return repository file tree overview (~1K-2K tokens)
-if (!query.trim()) {
-  const treeLines = buildRepositoryFileTree(fileEntries, 1800);
-  const treeOut = [
-    '<context_slice mode="file_tree_empty_query" root="' + escapeXmlAttr(path.basename(targetRoot)) + '" version="${SCRIPT_VERSION}" total_files="' + fileEntries.length + '">',
-    '  <note>Empty query received. Returning repository file tree overview; call context_slice again with specific symbol or file keywords to retrieve code.</note>',
-    '  <repository_file_tree>',
-    ...treeLines,
-    '  </repository_file_tree>',
-    '</context_slice>'
-  ];
-  process.stdout.write(treeOut.join('\\n') + '\\n');
-  process.exit(0);
-}
-
 const terms = expandQueryTerms(query);
 const allRawBlocks = [];
 const fileHeaders = new Map();
 const fileFooters = new Map();
-const configWindowByKey = new Map();
 
-for (const rec of textRecords) {
-  const isConfigFile = PLAIN_TEXT_CONFIG_EXT_RE.test(rec.relPath);
-  if (!isConfigFile) {
-    const hdr = extractFileHeader(rec.content);
-    if (hdr) fileHeaders.set(rec.relPath, hdr);
-    const ftr = extractFileFooter(rec.content);
-    if (ftr) fileFooters.set(rec.relPath, ftr);
-  }
-  const items = extractBlocks(rec.content, path.extname(rec.filePath), rec.relPath);
-  for (const b of items) {
-    const key = rec.relPath + ':' + b.startLine;
-    let rawTokens = estimateTokens(b.full);
-    if (isConfigFile && b.kind === 'module' && (b.endLine - b.startLine + 1) > 200) {
-      const win = slicePlainTextConfigWindow(b.full, terms);
-      if (win) {
-        configWindowByKey.set(key, win);
-        rawTokens = win.tokens;
-      }
+if (query.trim()) {
+  for (const rec of textRecords) {
+    const skipHdrFtr = PLAIN_TEXT_CONFIG_EXT_RE.test(rec.relPath) || DOC_EXT_RE.test(rec.relPath);
+    if (!skipHdrFtr) {
+      const hdr = extractFileHeader(rec.content);
+      if (hdr) fileHeaders.set(rec.relPath, hdr);
+      const ftr = extractFileFooter(rec.content);
+      if (ftr) fileFooters.set(rec.relPath, ftr);
     }
-    allRawBlocks.push({
-      ...b,
-      filePath: rec.relPath,
-      rawTokens,
-      skelTokens: estimateTokens(b.skeleton),
-    });
-  }
-}
-
-const totalBlocks = Math.max(1, allRawBlocks.length);
-const termDF = {};
-for (const t of terms) {
-  let df = 0;
-  for (const b of allRawBlocks) {
-    if (b.name.toLowerCase().includes(t) || b.filePath.toLowerCase().includes(t) || b.full.toLowerCase().includes(t)) {
-      df++;
-    }
-  }
-  termDF[t] = Math.max(1, df);
-}
-
-const scored = allRawBlocks.map((b) => {
-  const lower = b.full.toLowerCase();
-  const relLower = b.filePath.toLowerCase();
-  let score = 0;
-  for (const t of terms) {
-    const df = termDF[t] || 1;
-    const idf = Math.log(1 + (totalBlocks / df));
-    const scarcityMultiplier = (df / totalBlocks > 0.3) ? 0.35 : (df / totalBlocks > 0.15) ? 0.7 : 1.25;
-    const nameMatch = b.name.toLowerCase().includes(t) ? 35 : 0;
-    const pathMatch = relLower.includes(t) ? 25 : 0;
-    const bodyOcc = lower.split(t).length - 1;
-    const bodyScore = Math.min(15, 3 * Math.log1p(bodyOcc));
-    score += (nameMatch + pathMatch + bodyScore) * idf * scarcityMultiplier;
-  }
-  return { ...b, score };
-}).sort((a, b) => b.score - a.score);
-
-// True Call Graph (SymbolMap + Word-Boundary Call/Constant Matching + BFS maxHops)
-const symbolMap = new Map();
-const constSymbolNames = new Set();
-for (let i = 0; i < scored.length; i++) {
-  const b = scored[i];
-  if (b.name && b.kind !== 'module' && !CONTROL_WORDS.has(b.name)) {
-    const names = (b.kind === 'const' && b.name.includes(','))
-      ? b.name.split(',').map((s) => s.trim()).filter(Boolean)
-      : [b.name];
-    for (const sn of names) {
-      if (!symbolMap.has(sn)) symbolMap.set(sn, []);
-      symbolMap.get(sn).push(i);
-      if (b.kind === 'const') constSymbolNames.add(sn);
-    }
-  }
-}
-const callAdj = Array.from({ length: scored.length }, () => new Set());
-const definedNames = Array.from(symbolMap.keys());
-for (let i = 0; i < scored.length; i++) {
-  const caller = scored[i];
-  const maskedCaller = maskCommentsAndStrings(caller.full);
-  for (const sym of definedNames) {
-    if (sym === caller.name) continue;
-    if (maskedCaller.includes(sym)) {
-      const esc = sym.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
-      const isConstRef = constSymbolNames.has(sym) && sym.length >= 3;
-      const re = isConstRef ? new RegExp('\\\\b' + esc + '\\\\b', 'm') : new RegExp('\\\\b' + esc + '\\\\s*\\\\(', 'm');
-      if (re.test(maskedCaller)) {
-        for (const t of (symbolMap.get(sym) || [])) {
-          callAdj[i].add(t);
-          callAdj[t].add(i);
-        }
-      }
-    }
-  }
-}
-const hopDistances = new Map();
-const focalFiles = new Set();
-const bfsQ = [];
-for (let i = 0; i < scored.length; i++) {
-  if (scored[i].score > 0 && bfsQ.length < 3) {
-    bfsQ.push(i);
-    hopDistances.set(i, 0);
-    focalFiles.add(scored[i].filePath);
-  }
-}
-let qHead = 0;
-while (qHead < bfsQ.length) {
-  const curr = bfsQ[qHead++];
-  const curHop = hopDistances.get(curr) ?? 0;
-  if (curHop >= ${maxHops}) continue;
-  for (const nbr of callAdj[curr]) {
-    if (!hopDistances.has(nbr)) {
-      hopDistances.set(nbr, curHop + 1);
-      bfsQ.push(nbr);
+    const items = extractBlocks(rec.content, path.extname(rec.filePath), rec.relPath);
+    for (const b of items) {
+      allRawBlocks.push({ ...b, filePath: rec.relPath });
     }
   }
 }
 
-let remaining = budget;
-const includedIds = new Set();
-const includedFiles = [];
-const includedFilesSet = new Set();
-const fullStart1EndLine = new Map();
-const coveredRangesByFile = new Map();
-const partialFiles = new Set();
-const selectedByFile = new Map();
-const addCoveredRange = (fp, s, e) => {
-  if (!coveredRangesByFile.has(fp)) coveredRangesByFile.set(fp, []);
-  coveredRangesByFile.get(fp).push([s, e]);
-};
-const addSelectedBlock = (fp, entry) => {
-  if (!includedFilesSet.has(fp)) {
-    includedFilesSet.add(fp);
-    includedFiles.push(fp);
-  }
-  if (!selectedByFile.has(fp)) selectedByFile.set(fp, []);
-  selectedByFile.get(fp).push(entry);
-};
-const dirBudgetUsed = {};
-const maxDirBudget = budget * 0.65;
-
-const candidateItems = [];
-for (let i = 0; i < scored.length; i++) {
-  const item = scored[i];
-  const topDir = item.filePath.split('/')[0] || 'root';
-  const curDir = dirBudgetUsed[topDir] || 0;
-  const hop = hopDistances.get(i);
-  const isFocal = hop === 0 || (i < 2 && item.score > 0);
-  const key = item.filePath + ':' + item.startLine;
-  const win = configWindowByKey.get(key);
-
-  if (isFocal && (item.rawTokens <= remaining || remaining === budget) && (curDir + item.rawTokens <= maxDirBudget || remaining === budget)) {
-    remaining = Math.max(0, remaining - item.rawTokens);
-    dirBudgetUsed[topDir] = curDir + item.rawTokens;
-    includedIds.add(key);
-    if (win) {
-      for (const r of win.ranges) {
-        addCoveredRange(item.filePath, r[0], r[1]);
-        if (r[0] === 1) fullStart1EndLine.set(item.filePath, Math.max(fullStart1EndLine.get(item.filePath) || 0, r[1]));
-      }
-    } else {
-      addCoveredRange(item.filePath, item.startLine, item.endLine);
-      if (item.startLine === 1) {
-        fullStart1EndLine.set(item.filePath, Math.max(fullStart1EndLine.get(item.filePath) || 0, item.endLine));
-      }
-    }
-    addSelectedBlock(item.filePath, { tier: 'full', item, win });
-  } else if (item.skelTokens <= remaining && curDir + item.skelTokens <= maxDirBudget) {
-    const sameFileConst = item.kind === 'const' && (item.exported || /^[A-Z][A-Z0-9_]+$/.test(item.name)) && (item.endLine - item.startLine + 1) <= 25 && focalFiles.has(item.filePath);
-    const linked = (hop !== undefined && hop <= ${maxHops}) || item.score > 0 || sameFileConst;
-    if (linked) {
-      remaining -= item.skelTokens;
-      dirBudgetUsed[topDir] = curDir + item.skelTokens;
-      includedIds.add(key);
-      partialFiles.add(item.filePath);
-      if (item.skeleton === item.full) {
-        addCoveredRange(item.filePath, item.startLine, item.endLine);
-      }
-      addSelectedBlock(item.filePath, { tier: 'skeleton', item, win, hop });
-    } else {
-      partialFiles.add(item.filePath);
-      candidateItems.push(item);
-    }
-  } else {
-    partialFiles.add(item.filePath);
-    candidateItems.push(item);
-  }
-}
-
-// State B: Non-empty query with 0 matches -> warn agent & return repository file tree
-if (includedFiles.length === 0) {
-  const treeLines = buildRepositoryFileTree(fileEntries, 1800);
-  const zeroOut = [
-    '<context_slice mode="file_tree_zero_matches" root="' + escapeXmlAttr(path.basename(targetRoot)) + '" version="${SCRIPT_VERSION}" query="' + escapeXmlAttr(query) + '">',
-    '  <note>WARNING: 0 matches found for query "' + escapeXmlText(query) + '". Do NOT guess code from this file tree alone—pick valid file paths or symbol names from the tree below and call context_slice again.</note>',
-    '  <repository_file_tree>',
-    ...treeLines,
-    '  </repository_file_tree>',
-    '</context_slice>'
-  ];
-  process.stdout.write(zeroOut.join('\\n') + '\\n');
-  process.exit(0);
-}
-
-const headerByFile = new Map();
-const headerEndByFile = new Map();
-for (const fp of includedFiles) {
-  const hdr = fileHeaders.get(fp);
-  if (!hdr) continue;
-  const coveredEnd = fullStart1EndLine.get(fp) || 0;
-  if (coveredEnd >= hdr.endLine) continue;
-  headerEndByFile.set(fp, hdr.endLine);
-  headerByFile.set(fp, hdr);
-}
-
-const footerByFile = new Map();
-for (const fp of includedFiles) {
-  const ftr = fileFooters.get(fp);
-  if (!ftr) continue;
-  const ranges = coveredRangesByFile.get(fp) || [];
-  const totalLines = fileLineCounts.get(fp) || 0;
-  const wholeFileCovered = ranges.some(([s, e]) => s <= 1 && e >= totalLines);
-  if (!partialFiles.has(fp) && wholeFileCovered) continue;
-  const hdrEnd = headerEndByFile.get(fp) || 0;
-  const uncovered = ftr.chunks.filter((c) => c.startLine > hdrEnd && !ranges.some(([s, e]) => c.startLine >= s && c.endLine <= e));
-  if (uncovered.length > 0) {
-    footerByFile.set(fp, {
-      startLine: uncovered[0].startLine,
-      endLine: uncovered[uncovered.length - 1].endLine,
-      text: uncovered.map((c) => c.text).join('\\n'),
-      chunks: uncovered
-    });
-  }
-}
-
-const out = [
-  '<context_slice mode="progressive-structural-slice" root="' + escapeXmlAttr(path.basename(targetRoot)) + '" version="${SCRIPT_VERSION}" budget="' + budget + '">'
-];
-
-for (const fp of includedFiles) {
-  const entries = (selectedByFile.get(fp) || []).slice().sort((a, b) => a.item.startLine - b.item.startLine);
-  const hdr = headerByFile.get(fp);
-  const ftr = footerByFile.get(fp);
-  const totalLines = fileLineCounts.get(fp) || 0;
-  const shownRanges = [];
-  if (hdr) shownRanges.push([1, hdr.endLine]);
-  for (const ent of entries) {
-    if (ent.win) shownRanges.push(...ent.win.ranges);
-    else shownRanges.push([ent.item.startLine, ent.item.endLine]);
-  }
-  if (ftr) {
-    for (const c of ftr.chunks) shownRanges.push([c.startLine, c.endLine]);
-  }
-  out.push(\`  <file path="\${escapeXmlAttr(fp)}" total_lines="\${totalLines}" shown_lines="\${formatShownLines(shownRanges)}">\`);
-  if (hdr) {
-    out.push(\`    <file_header lines="1-\${hdr.endLine}">\`);
-    out.push(hdr.header);
-    out.push('    </file_header>');
-  }
-  for (const ent of entries) {
-    const it = ent.item;
-    if (ent.tier === 'full') {
-      const linesAttr = ent.win ? formatShownLines(ent.win.ranges) : \`\${it.startLine}-\${it.endLine}\`;
-      out.push(\`    <focal symbol="\${escapeXmlAttr(it.name)}" lines="\${linesAttr}">\`);
-      out.push(ent.win ? ent.win.windowedCode : it.full);
-      out.push('    </focal>');
-    } else {
-      const hopAttr = ent.hop !== undefined ? \` hop="\${ent.hop}"\` : '';
-      out.push(\`    <skeleton symbol="\${escapeXmlAttr(it.name)}" lines="\${it.startLine}-\${it.endLine}"\${hopAttr}>\`);
-      out.push(ent.win ? ent.win.windowedCode : it.skeleton);
-      out.push('    </skeleton>');
-    }
-  }
-  if (ftr) {
-    out.push(\`    <file_footer lines="\${ftr.startLine}-\${ftr.endLine}">\`);
-    out.push(ftr.text);
-    out.push('    </file_footer>');
-  }
-  out.push('  </file>');
-}
-
-const omitted = candidateItems.filter(item => item.score > 0 && !includedIds.has(item.filePath + ':' + item.startLine)).slice(0, 3);
-if (omitted.length > 0) {
-  out.push('  <omitted_top_matches>');
-  for (const o of omitted) {
-    out.push(\`    <!-- Omitted: \${o.filePath}:\${o.startLine} (\${o.name}, score: \${o.score.toFixed(1)}) — consider expanding -->\`);
-  }
-  out.push('  </omitted_top_matches>');
-}
-
-out.push('</context_slice>');
-process.stdout.write(out.join('\\n') + '\\n');
+const outputXml = assembleContextSliceXml({
+  blocks: allRawBlocks,
+  fileEntries,
+  fileLineCounts,
+  fileHeaders,
+  fileFooters,
+  rawQuery: query,
+  terms,
+  budget,
+  maxHops: ${maxHops},
+  autoExpand: false,
+  rootAttr: path.basename(targetRoot),
+  version: '${SCRIPT_VERSION}',
+  subPathTag: '',
+  includeParserAttr: false,
+  controlWords: CONTROL_WORDS,
+  maskFn: maskCommentsAndStrings
+});
+process.stdout.write(outputXml + '\\n');
 `;
 }
 
@@ -1350,7 +1898,9 @@ function expandQueryTerms(query) {
   for (const term of snapshot) {
     for (const t of bilingualLookup(term)) terms.add(t);
   }
-  return [...terms].filter(Boolean);
+  const collected = [...terms].filter(Boolean);
+  const nonSyntax = collected.filter((t) => !SYNTAX_NOISE_WORDS.has(t));
+  return nonSyntax.length > 0 ? nonSyntax : collected;
 }
 
 const TOOL_DEF = {
@@ -1556,24 +2106,49 @@ async function extractBlocksWithTreeSitter(code, ext, fileName) {
       if (!bodyCap || !nameCap) continue;
       const startLine = bodyCap.node.startPosition.row + 1;
       const endLine = bodyCap.node.endPosition.row + 1;
-      const name = String(nameCap.node.text || '').trim();
-      const key = name + '@' + startLine + '-' + endLine;
-      if (!name || seen.has(key)) continue;
-      seen.add(key);
+      const rawName = String(nameCap.node.text || '').trim();
+      if (!rawName) continue;
 
       const nodeType = bodyCap.node.type || 'function';
-      const kind = nodeType.includes('class') ? 'class'
+      let name = rawName;
+      let kind = nodeType.includes('class') ? 'class'
         : nodeType.includes('interface') ? 'interface'
         : nodeType.includes('struct') ? 'struct'
         : nodeType.includes('impl') ? 'impl'
         : nodeType.includes('method') ? 'method'
         : 'function';
 
+      if (langName === 'python' && nodeType === 'function_definition') {
+        let p = bodyCap.node.parent;
+        while (p) {
+          if (p.type === 'class_definition') {
+            const clsNameNode = p.childForFieldName ? p.childForFieldName('name') : null;
+            const clsName = clsNameNode ? String(clsNameNode.text || '').trim() : '';
+            if (clsName) {
+              name = \`\${clsName}.\${rawName}\`;
+              kind = 'method';
+            }
+            break;
+          }
+          p = p.parent;
+        }
+      }
+
+      const key = name + '@' + startLine + '-' + endLine;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
       const full = lines.slice(startLine - 1, endLine).join('\\n');
       let skeleton = full;
-      if (endLine - startLine >= 3) {
+      if (langName === 'python' && kind === 'class') {
+        skeleton = buildPythonClassSkeleton(full, startLine);
+      } else if (endLine - startLine >= 3) {
         if (langName === 'python') {
-          skeleton = \`\${lines[startLine - 1]}\\n    # ... \${endLine - startLine} lines folded\`;
+          const sigEndIdx = findPythonSignatureEndIdx(lines, startLine - 1);
+          const indentStr = (lines[startLine - 1].match(/^\\s*/) || [''])[0];
+          const sigText = lines.slice(startLine - 1, sigEndIdx + 1).join('\\n');
+          const foldedLines = Math.max(1, endLine - (sigEndIdx + 1));
+          skeleton = foldedLines > 2 ? \`\${sigText}\\n\${indentStr}    # ... \${foldedLines} lines folded\` : full;
         } else {
           const sigIdx = full.indexOf('{');
           if (sigIdx !== -1 && kind !== 'interface') {
@@ -1640,20 +2215,10 @@ function extractBlocks(code, ext, fileName) {
     let m = null;
 
     if (e === '.py' || e === '.pyw') {
-      m = line.match(/^(?:async\\s+)?(def|class)\\s+([A-Za-z_][A-Za-z0-9_]*)/);
-      if (m) {
-        name = m[2];
-        kind = m[1] === 'class' ? 'class' : 'function';
-        let end = i;
-        for (let j = i + 1; j < lines.length; j++) {
-          if (lines[j].trim() === '' || /^\\s+/.test(lines[j])) end = j;
-          else break;
-        }
-        while (end > i && lines[end].trim() === '') end--;
-        const full = lines.slice(i, end + 1).join('\\n');
-        const skeleton = end - i > 2 ? \`\${lines[i]}\\n    # ... \${end - i} lines folded\` : full;
-        blocks.push({ name, kind, startLine: i + 1, endLine: end + 1, full, skeleton });
-        i = end;
+      const pyRes = extractPythonBlocks(lines, i);
+      if (pyRes) {
+        blocks.push(...pyRes.blocks);
+        i = pyRes.endIdx;
         continue;
       }
     }
@@ -1854,29 +2419,33 @@ async function collectProjectBlocks(root, scanRoot) {
     let fileHeader = null;
     let fileFooter = null;
     let fileLines = 0;
-    const isConfigFile = PLAIN_TEXT_CONFIG_EXT_RE.test(rel);
+    const skipHdrFtr = PLAIN_TEXT_CONFIG_EXT_RE.test(rel) || DOC_EXT_RE.test(rel);
     if (cached && cached.mtime === mtime) {
       items = cached.items;
       parserMode = cached.parserMode || 'regex';
-      fileHeader = isConfigFile ? null : (cached.header ?? null);
-      fileFooter = isConfigFile ? null : (cached.footer ?? null);
+      fileHeader = skipHdrFtr ? null : (cached.header ?? null);
+      fileFooter = skipHdrFtr ? null : (cached.footer ?? null);
       fileLines = cached.lineCount || 0;
     } else {
       const rawBuf = fs.readFileSync(f);
       if (isBinaryBuffer(rawBuf)) continue;
       const raw = rawBuf.toString('utf8');
       fileLines = raw.replace(/\\r\\n/g, '\\n').split('\\n').length;
-      fileHeader = isConfigFile ? null : extractFileHeader(raw);
-      fileFooter = isConfigFile ? null : extractFileFooter(raw);
+      fileHeader = skipHdrFtr ? null : extractFileHeader(raw);
+      fileFooter = skipHdrFtr ? null : extractFileFooter(raw);
       const ext = path.extname(f);
-      const tsBlocks = isConfigFile ? null : await extractBlocksWithTreeSitter(raw, ext, rel);
+      const tsBlocks = skipHdrFtr ? null : await extractBlocksWithTreeSitter(raw, ext, rel);
       if (tsBlocks && tsBlocks.length > 0) {
         const extraConsts = extractTopLevelConstants(raw, ext, tsBlocks);
         items = extraConsts.length > 0 ? [...tsBlocks, ...extraConsts].sort((a, b) => a.startLine - b.startLine) : tsBlocks;
         parserMode = 'tree-sitter-wasm';
       } else {
         items = extractBlocks(raw, ext, rel);
-        parserMode = isConfigFile ? 'plain-text-config' : 'state-machine-regex';
+        parserMode = PLAIN_TEXT_CONFIG_EXT_RE.test(rel)
+          ? 'plain-text-config'
+          : DOC_EXT_RE.test(rel)
+            ? 'markdown-doc'
+            : 'state-machine-regex';
       }
       FILE_CACHE.set(f, { mtime, parserMode, items, header: fileHeader, footer: fileFooter, lineCount: fileLines });
     }
@@ -1888,6 +2457,7 @@ async function collectProjectBlocks(root, scanRoot) {
     for (const b of items) {
       allBlocks.push({
         ...b,
+        filePath: rel,
         rel,
         parserMode,
         lineCount: Math.max(1, b.endLine - b.startLine + 1),
@@ -1999,324 +2569,46 @@ async function sliceProject(query, projectPath, budget = ${budgetTokens}, autoEx
     // State A: Empty query -> return repository file tree overview (~1K-2K tokens)
     if (!rawQuery.trim()) {
       const fileEntries = collectFileOverview(root, scanRoot);
-      const treeLines = buildRepositoryFileTree(fileEntries, 1800);
-      return [
-        \`<context_slice mode="file_tree_empty_query" root="\${escapeXmlAttr(root)}" version="${SCRIPT_VERSION}"\${subPathTag} total_files="\${fileEntries.length}">\`,
-        '  <note>Empty query received. Returning repository file tree overview; call context_slice again with specific symbol or file keywords to retrieve code.</note>',
-        '  <repository_file_tree>',
-        ...treeLines,
-        '  </repository_file_tree>',
-        '</context_slice>'
-      ].join('\\n');
+      return assembleContextSliceXml({
+        blocks: [],
+        fileEntries,
+        fileLineCounts: new Map(),
+        fileHeaders: new Map(),
+        fileFooters: new Map(),
+        rawQuery,
+        terms: [],
+        budget,
+        maxHops: ${maxHops},
+        autoExpand,
+        rootAttr: root,
+        version: '${SCRIPT_VERSION}',
+        subPathTag,
+        includeParserAttr: true,
+        controlWords: CONTROL_WORDS,
+        maskFn: maskCommentsAndStrings
+      });
     }
 
     const terms = expandQueryTerms(rawQuery);
     const { blocks, headerMap, footerMap, lineCountMap, fileEntries } = await collectProjectBlocks(root, scanRoot);
-
-    const configWindowByKey = new Map();
-    const preparedBlocks = blocks.map((b) => {
-      const key = b.rel + ':' + b.startLine;
-      if (PLAIN_TEXT_CONFIG_EXT_RE.test(b.rel) && b.kind === 'module' && b.lineCount > 200) {
-        const win = slicePlainTextConfigWindow(b.full, terms);
-        if (win) {
-          configWindowByKey.set(key, win);
-          return { ...b, rawTk: win.tokens };
-        }
-      }
-      return b;
+    return assembleContextSliceXml({
+      blocks,
+      fileEntries,
+      fileLineCounts: lineCountMap,
+      fileHeaders: headerMap,
+      fileFooters: footerMap,
+      rawQuery,
+      terms,
+      budget,
+      maxHops: ${maxHops},
+      autoExpand,
+      rootAttr: root,
+      version: '${SCRIPT_VERSION}',
+      subPathTag,
+      includeParserAttr: true,
+      controlWords: CONTROL_WORDS,
+      maskFn: maskCommentsAndStrings
     });
-
-    const totalBlocks = Math.max(1, preparedBlocks.length);
-    const termDF = {};
-    for (const t of terms) {
-      let df = 0;
-      for (const b of preparedBlocks) {
-        if (b.name.toLowerCase().includes(t) || b.rel.toLowerCase().includes(t) || b.full.toLowerCase().includes(t)) {
-          df++;
-        }
-      }
-      termDF[t] = Math.max(1, df);
-    }
-
-    const allBlocks = preparedBlocks.map((b) => {
-      const lower = b.full.toLowerCase();
-      const relLower = b.rel.toLowerCase();
-      let score = 0;
-      for (const t of terms) {
-        const df = termDF[t] || 1;
-        const idf = Math.log(1 + (totalBlocks / df));
-        const scarcityMultiplier = (df / totalBlocks > 0.3) ? 0.35 : (df / totalBlocks > 0.15) ? 0.7 : 1.25;
-        const nameMatch = b.name.toLowerCase().includes(t) ? 35 : 0;
-        const pathMatch = relLower.includes(t) ? 25 : 0;
-        const bodyOcc = lower.split(t).length - 1;
-        const bodyScore = Math.min(12, 2.5 * Math.log1p(bodyOcc));
-        score += (nameMatch + pathMatch + bodyScore) * idf * scarcityMultiplier;
-      }
-      return { ...b, score };
-    }).sort((a, b) => b.score - a.score);
-
-    // 構建專案 SymbolMap 與真實依賴圖 (True Call Graph + Constants)
-    const symbolMap = new Map();
-    const constSymbolNames = new Set();
-    for (let idx = 0; idx < allBlocks.length; idx++) {
-      const b = allBlocks[idx];
-      if (b.name && b.kind !== 'module' && !CONTROL_WORDS.has(b.name)) {
-        const names = (b.kind === 'const' && b.name.includes(','))
-          ? b.name.split(',').map((s) => s.trim()).filter(Boolean)
-          : [b.name];
-        for (const sn of names) {
-          if (!symbolMap.has(sn)) symbolMap.set(sn, []);
-          symbolMap.get(sn).push(idx);
-          if (b.kind === 'const') constSymbolNames.add(sn);
-        }
-      }
-    }
-
-    const callAdj = Array.from({ length: allBlocks.length }, () => new Set());
-    const definedNames = Array.from(symbolMap.keys());
-    for (let i = 0; i < allBlocks.length; i++) {
-      const caller = allBlocks[i];
-      const maskedCaller = maskCommentsAndStrings(caller.full);
-      for (const sym of definedNames) {
-        if (sym === caller.name) continue;
-        if (maskedCaller.includes(sym)) {
-          const esc = sym.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
-          const isConstRef = constSymbolNames.has(sym) && sym.length >= 3;
-          const callRe = isConstRef ? new RegExp('\\\\b' + esc + '\\\\b', 'm') : new RegExp('\\\\b' + esc + '\\\\s*\\\\(', 'm');
-          if (callRe.test(maskedCaller)) {
-            for (const t of (symbolMap.get(sym) || [])) {
-              callAdj[i].add(t);
-              callAdj[t].add(i);
-            }
-          }
-        }
-      }
-    }
-
-    // 計算自頂部修改重點 (Focal) 出發的 1 層 (1-hop) 與 2 層 (2-hop) 關聯距離
-    const focalIndices = [];
-    const focalFiles = new Set();
-    const hopDistances = new Map();
-    for (let i = 0; i < allBlocks.length; i++) {
-      if (allBlocks[i].score > 0 && focalIndices.length < 3) {
-        focalIndices.push(i);
-        hopDistances.set(i, 0);
-        focalFiles.add(allBlocks[i].rel);
-      }
-    }
-
-    const bfsQ = [...focalIndices];
-    let qHead = 0;
-    while (qHead < bfsQ.length) {
-      const curr = bfsQ[qHead++];
-      const curHop = hopDistances.get(curr) ?? 0;
-      if (curHop >= ${maxHops}) continue;
-      for (const nbr of callAdj[curr]) {
-        if (!hopDistances.has(nbr)) {
-          hopDistances.set(nbr, curHop + 1);
-          bfsQ.push(nbr);
-        }
-      }
-    }
-
-    let used = 0;
-    const skelCandidates = [];
-    const includedIds = new Set();
-    const includedFiles = [];
-    const includedFilesSet = new Set();
-    const partialFiles = new Set();
-    const selectedByFile = new Map();
-    const fullStart1EndLine = new Map();
-    const coveredRangesByFile = new Map();
-    const addCoveredRange = (rel, s, e) => {
-      if (!coveredRangesByFile.has(rel)) coveredRangesByFile.set(rel, []);
-      coveredRangesByFile.get(rel).push([s, e]);
-    };
-    const addSelectedBlock = (rel, entry) => {
-      if (!includedFilesSet.has(rel)) {
-        includedFilesSet.add(rel);
-        includedFiles.push(rel);
-      }
-      if (!selectedByFile.has(rel)) selectedByFile.set(rel, []);
-      selectedByFile.get(rel).push(entry);
-    };
-    const candidateItems = [];
-    const dirBudgetUsed = {};
-    const maxDirBudget = budget * 0.65;
-
-    for (let i = 0; i < allBlocks.length; i++) {
-      const b = allBlocks[i];
-      const topDir = b.rel.split('/')[0] || 'root';
-      const curDir = dirBudgetUsed[topDir] || 0;
-      const hop = hopDistances.get(i);
-      const isFocal = (hop === 0 || (i < 3 && b.score > 0));
-      const winKey = b.rel + ':' + b.startLine;
-      const win = configWindowByKey.get(winKey);
-
-      if (isFocal && ((used + b.rawTk <= budget && curDir + b.rawTk <= maxDirBudget) || used === 0)) {
-        used += b.rawTk;
-        dirBudgetUsed[topDir] = curDir + b.rawTk;
-        includedIds.add(b.rel + ':' + b.name + '@' + b.startLine);
-        if (win) {
-          for (const r of win.ranges) {
-            addCoveredRange(b.rel, r[0], r[1]);
-            if (r[0] === 1) fullStart1EndLine.set(b.rel, Math.max(fullStart1EndLine.get(b.rel) || 0, r[1]));
-          }
-        } else {
-          addCoveredRange(b.rel, b.startLine, b.endLine);
-          if (b.startLine === 1) {
-            fullStart1EndLine.set(b.rel, Math.max(fullStart1EndLine.get(b.rel) || 0, b.endLine));
-          }
-        }
-        addSelectedBlock(b.rel, { tier: 'full', b, win, autoExpanded: false });
-      } else if (used + b.skelTk <= budget && curDir + b.skelTk <= maxDirBudget) {
-        const sameFileConst = b.kind === 'const' && (b.exported || /^[A-Z][A-Z0-9_]+$/.test(b.name)) && b.lineCount <= 25 && focalFiles.has(b.rel);
-        const linked = (hop !== undefined && hop <= ${maxHops}) || b.score > 0 || sameFileConst;
-        if (linked) {
-          used += b.skelTk;
-          dirBudgetUsed[topDir] = curDir + b.skelTk;
-          skelCandidates.push({ ...b, linked, hop: hop ?? null, win });
-          includedIds.add(b.rel + ':' + b.name + '@' + b.startLine);
-          if (!includedFilesSet.has(b.rel)) {
-            includedFilesSet.add(b.rel);
-            includedFiles.push(b.rel);
-          }
-          partialFiles.add(b.rel);
-          if (b.skeleton === b.full) {
-            addCoveredRange(b.rel, b.startLine, b.endLine);
-          }
-        } else {
-          partialFiles.add(b.rel);
-          candidateItems.push(b);
-        }
-      } else {
-        partialFiles.add(b.rel);
-        candidateItems.push(b);
-      }
-    }
-
-    const autoExpandedNames = [];
-    for (const item of skelCandidates) {
-      const delta = Math.max(0, item.rawTk - item.skelTk);
-      const isComplexCluster = (item.linked || item.score > 0) && (item.lineCount >= 16 || delta >= 45);
-      const topDir = item.rel.split('/')[0] || 'root';
-      const curDir = dirBudgetUsed[topDir] || 0;
-
-      if (autoExpand && isComplexCluster && autoExpandedNames.length < 4 && used + delta <= budget && curDir + delta <= maxDirBudget) {
-        used += delta;
-        dirBudgetUsed[topDir] = curDir + delta;
-        autoExpandedNames.push(item.name);
-        if (item.win) {
-          for (const r of item.win.ranges) {
-            addCoveredRange(item.rel, r[0], r[1]);
-            if (r[0] === 1) fullStart1EndLine.set(item.rel, Math.max(fullStart1EndLine.get(item.rel) || 0, r[1]));
-          }
-        } else {
-          addCoveredRange(item.rel, item.startLine, item.endLine);
-          if (item.startLine === 1) {
-            fullStart1EndLine.set(item.rel, Math.max(fullStart1EndLine.get(item.rel) || 0, item.endLine));
-          }
-        }
-        addSelectedBlock(item.rel, { tier: 'full', b: item, win: item.win, autoExpanded: true });
-      } else {
-        addSelectedBlock(item.rel, { tier: 'skeleton', b: item, win: item.win, hop: item.hop });
-      }
-    }
-
-    // State B: Non-empty query with 0 matches -> warn agent & return repository file tree
-    if (includedFiles.length === 0) {
-      const treeLines = buildRepositoryFileTree(fileEntries, 1800);
-      return [
-        \`<context_slice mode="file_tree_zero_matches" root="\${escapeXmlAttr(root)}" version="${SCRIPT_VERSION}"\${subPathTag} query="\${escapeXmlAttr(rawQuery)}">\`,
-        \`  <note>WARNING: 0 matches found for query "\${escapeXmlText(rawQuery)}". Do NOT guess code from this file tree alone—pick valid file paths or symbol names from the tree below and call context_slice again.</note>\`,
-        '  <repository_file_tree>',
-        ...treeLines,
-        '  </repository_file_tree>',
-        '</context_slice>'
-      ].join('\\n');
-    }
-
-    const headerByFile = new Map();
-    const headerEndByFile = new Map();
-    for (const rel of includedFiles) {
-      const hdr = headerMap.get(rel);
-      if (!hdr) continue;
-      if ((fullStart1EndLine.get(rel) || 0) >= hdr.endLine) continue;
-      headerEndByFile.set(rel, hdr.endLine);
-      headerByFile.set(rel, hdr);
-    }
-
-    const footerByFile = new Map();
-    for (const rel of includedFiles) {
-      const ftr = footerMap.get(rel);
-      if (!ftr) continue;
-      const ranges = coveredRangesByFile.get(rel) || [];
-      const totalLines = lineCountMap.get(rel) || 0;
-      const wholeFileCovered = ranges.some(([s, e]) => s <= 1 && e >= totalLines);
-      if (!partialFiles.has(rel) && wholeFileCovered) continue;
-      const hdrEnd = headerEndByFile.get(rel) || 0;
-      const uncovered = ftr.chunks.filter((c) => c.startLine > hdrEnd && !ranges.some(([s, e]) => c.startLine >= s && c.endLine <= e));
-      if (uncovered.length > 0) {
-        footerByFile.set(rel, {
-          startLine: uncovered[0].startLine,
-          endLine: uncovered[uncovered.length - 1].endLine,
-          text: uncovered.map((c) => c.text).join('\\n'),
-          chunks: uncovered
-        });
-      }
-    }
-
-    const fileSections = [];
-    for (const rel of includedFiles) {
-      const entries = (selectedByFile.get(rel) || []).slice().sort((a, b) => a.b.startLine - b.b.startLine);
-      const hdr = headerByFile.get(rel);
-      const ftr = footerByFile.get(rel);
-      const totalLines = lineCountMap.get(rel) || 0;
-      const shownRanges = [];
-      if (hdr) shownRanges.push([1, hdr.endLine]);
-      for (const ent of entries) {
-        if (ent.win) shownRanges.push(...ent.win.ranges);
-        else shownRanges.push([ent.b.startLine, ent.b.endLine]);
-      }
-      if (ftr) {
-        for (const c of ftr.chunks) shownRanges.push([c.startLine, c.endLine]);
-      }
-      fileSections.push(\`  <file path="\${escapeXmlAttr(rel)}" total_lines="\${totalLines}" shown_lines="\${formatShownLines(shownRanges)}">\`);
-      if (hdr) {
-        fileSections.push(\`    <file_header lines="1-\${hdr.endLine}">\`);
-        fileSections.push(hdr.header);
-        fileSections.push('    </file_header>');
-      }
-      for (const ent of entries) {
-        const b = ent.b;
-        if (ent.tier === 'full') {
-          const linesAttr = ent.win ? formatShownLines(ent.win.ranges) : \`\${b.startLine}-\${b.endLine}\`;
-          const autoAttr = ent.autoExpanded ? ' autoExpanded="true"' : '';
-          fileSections.push(\`    <focal symbol="\${escapeXmlAttr(b.name)}" lines="\${linesAttr}" parser="\${escapeXmlAttr(b.parserMode)}"\${autoAttr}>\`);
-          fileSections.push(ent.win ? ent.win.windowedCode : b.full);
-          fileSections.push('    </focal>');
-        } else {
-          const hopAttr = ent.hop !== null && ent.hop !== undefined ? \` hop="\${ent.hop}"\` : '';
-          fileSections.push(\`    <skeleton symbol="\${escapeXmlAttr(b.name)}" lines="\${b.startLine}-\${b.endLine}"\${hopAttr}>\`);
-          fileSections.push(ent.win ? ent.win.windowedCode : b.skeleton);
-          fileSections.push('    </skeleton>');
-        }
-      }
-      if (ftr) {
-        fileSections.push(\`    <file_footer lines="\${ftr.startLine}-\${ftr.endLine}">\`);
-        fileSections.push(ftr.text);
-        fileSections.push('    </file_footer>');
-      }
-      fileSections.push('  </file>');
-    }
-
-    const omitted = candidateItems.filter(b => b.score > 0 && !includedIds.has(b.rel + ':' + b.name + '@' + b.startLine)).slice(0, 3);
-    const omittedTag = omitted.length > 0
-      ? \`\\n  <omitted_top_matches>\\n\` + omitted.map(o => \`    <!-- Omitted: \${o.rel}:\${o.startLine} (\${o.name}, score: \${o.score.toFixed(1)}) — consider expanding -->\`).join('\\n') + \`\\n  </omitted_top_matches>\`
-      : '';
-
-    const expandTag = autoExpandedNames.length > 0 ? \` autoExpanded="\${escapeXmlAttr(autoExpandedNames.join(','))}"\` : '';
-    return \`<context_slice mode="progressive-structural-slice" root="\${escapeXmlAttr(root)}" version="${SCRIPT_VERSION}"\${subPathTag} budget="\${budget}" used="\${used}"\${expandTag}>\\n\${fileSections.join('\\n')}\${omittedTag}\\n</context_slice>\`;
   } catch (err) {
     return \`Error: \${err.message}\`;
   }

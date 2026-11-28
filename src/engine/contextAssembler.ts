@@ -11,7 +11,7 @@ import {
   ParsedWorkspace,
   ProtocolComparisonMetrics,
 } from '../types/context';
-import { estimateTokens } from './astParser';
+import { buildPythonClassSkeleton, estimateTokens } from './astParser';
 import {
   detectHighComplexityClusters,
   invokeSkeletonExpansionMcpTool,
@@ -28,6 +28,28 @@ function containsCJK(text: string): boolean {
 }
 
 const PLAIN_TEXT_CONFIG_EXT_RE = /\.(json|jsonc|json5|yaml|yml|toml|ini|cfg|conf|xml|properties|txt)$/i;
+const DOC_EXT_RE = /\.(md|mdx|rst|adoc|asciidoc)$/i;
+const DOC_PATH_RE =
+  /(^|\/)(docs?|documentation|wiki|guides?)\/|(^|\/)(README|CHANGELOG|HISTORY|CONTRIBUTING|CHANGES|RELEASES|MIGRATION|UPGRADING|AUTHORS|NOTICE|LICENSE)([^/]*)$/i;
+const TEST_PATH_RE =
+  /(^|\/)(tests?|__tests__|spec|specs|testing|fixtures?|benchmarks?|examples?|samples?)\/|(\.|_)(test|spec)\.[^/]+$|(^|\/)test_[^/]+\.[^/]+$/i;
+
+type FileRole = 'doc' | 'test' | 'source';
+
+function classifyFileRole(filePath: string): FileRole {
+  const norm = filePath.replace(/\\/g, '/');
+  if (DOC_EXT_RE.test(norm) || DOC_PATH_RE.test(norm)) return 'doc';
+  if (TEST_PATH_RE.test(norm)) return 'test';
+  return 'source';
+}
+
+function getQueryRoleIntents(query: string): { wantsDocs: boolean; wantsTests: boolean } {
+  const q = query.toLowerCase();
+  return {
+    wantsDocs: /\b(readme|changelog|docs|documentation|markdown|guide)\b|\.md\b|文件|說明/.test(q),
+    wantsTests: /\b(tests?|specs?|pytest|unittest|jest|vitest)\b|測試/.test(q),
+  };
+}
 
 const EN_CONVERSATIONAL_STOPWORDS = new Set([
   'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
@@ -39,6 +61,12 @@ const EN_CONVERSATIONAL_STOPWORDS = new Set([
   'it', 'its', 'this', 'that', 'these', 'those', 'there', 'here',
   'and', 'or', 'but', 'so', 'than', 'too', 'very', 'just', 'only', 'also',
   'fix', 'modify', 'want', 'need', 'tell',
+]);
+
+const SYNTAX_NOISE_WORDS = new Set([
+  'class', 'def', 'function', 'func', 'fn', 'struct', 'interface', 'type', 'enum',
+  'const', 'let', 'var', 'async', 'await', 'import', 'export', 'return',
+  'public', 'private', 'protected', 'static',
 ]);
 
 const ZH_CONVERSATIONAL_STOPWORDS_RE =
@@ -64,7 +92,7 @@ function expandQueryTerms(query: string): string[] {
 
   const tokens = new Set<string>();
 
-  // 1. ASCII 部分（保留版號與連字號識別碼如 0.4.0、v0.4.0、ctxslice-mcp，同時安全濾除自然語言口語停用詞）
+  // 1. ASCII 部分（保留版號與連字號識別碼如 0.4.1、v0.4.1、ctxslice-mcp，同時安全濾除自然語言口語停用詞）
   const asciiParts = trimmed.toLowerCase().match(/[a-z0-9_]+(?:[.-][a-z0-9_]+)*/g) ?? [];
   for (const p of asciiParts) {
     if (p.length >= 2 && !EN_CONVERSATIONAL_STOPWORDS.has(p)) {
@@ -105,7 +133,10 @@ function expandQueryTerms(query: string): string[] {
     bilingual.forEach((t) => tokens.add(t));
   }
 
-  return Array.from(tokens);
+  // 5. Filter pure syntax keywords (class, def, function...) whenever non-syntax identifiers exist
+  const collected = Array.from(tokens);
+  const nonSyntax = collected.filter((t) => !SYNTAX_NOISE_WORDS.has(t));
+  return nonSyntax.length > 0 ? nonSyntax : collected;
 }
 
 function escapeXmlAttr(value: string): string {
@@ -220,7 +251,82 @@ function buildRepositoryFileTree(files: CodeFile[], maxTokens = 1800): string[] 
   return out;
 }
 
-export function scoreNodeRelevance(node: AstSymbolNode, queryTerms: string[], allNodes: AstSymbolNode[] = []): number {
+function sliceDocWindow(
+  content: string,
+  queryTerms: string[],
+  radius = 16,
+  maxTokens = 480,
+): ConfigWindowSlice {
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  if (lines.length <= 45) {
+    return {
+      windowedCode: content,
+      ranges: [[1, Math.max(1, lines.length)]],
+      tokens: estimateTokens(content),
+    };
+  }
+
+  const matchedLines: number[] = [];
+  if (queryTerms.length > 0) {
+    for (let i = 0; i < lines.length; i++) {
+      const lower = lines[i].toLowerCase();
+      if (queryTerms.some((t) => lower.includes(t))) {
+        matchedLines.push(i + 1);
+        if (matchedLines.length >= 3) break;
+      }
+    }
+  }
+
+  const rawRanges: Array<[number, number]> =
+    matchedLines.length > 0
+      ? matchedLines.slice(0, 2).map((ln) => [Math.max(1, ln - radius), Math.min(lines.length, ln + radius)])
+      : [[1, Math.min(lines.length, 24)]];
+
+  const merged = mergeLineRanges(rawRanges);
+  const parts: string[] = [];
+  const usedRanges: Array<[number, number]> = [];
+  let accTokens = 0;
+
+  for (let idx = 0; idx < merged.length; idx++) {
+    const [s, e] = merged[idx];
+    const sliceLines: string[] = [];
+    let endWritten = s - 1;
+    for (let ln = s; ln <= e; ln++) {
+      const candidate = lines[ln - 1];
+      const tk = estimateTokens(candidate);
+      if (accTokens + tk > maxTokens && sliceLines.length > 0) break;
+      sliceLines.push(candidate);
+      accTokens += tk;
+      endWritten = ln;
+    }
+    if (sliceLines.length === 0) break;
+    if (idx > 0 && usedRanges.length > 0) {
+      const prevEnd = usedRanges[usedRanges.length - 1][1];
+      if (s > prevEnd + 1) parts.push(`<!-- ... lines ${prevEnd + 1}-${s - 1} omitted ... -->`);
+    }
+    parts.push(sliceLines.join('\n'));
+    usedRanges.push([s, endWritten]);
+    if (accTokens >= maxTokens) break;
+  }
+
+  if (usedRanges.length > 0 && usedRanges[usedRanges.length - 1][1] < lines.length) {
+    parts.push(`<!-- ... ${lines.length - usedRanges[usedRanges.length - 1][1]} remaining doc lines omitted ... -->`);
+  }
+
+  const windowedCode = parts.join('\n');
+  return {
+    windowedCode,
+    ranges: usedRanges.length > 0 ? usedRanges : [[1, Math.min(lines.length, 20)]],
+    tokens: estimateTokens(windowedCode),
+  };
+}
+
+export function scoreNodeRelevance(
+  node: AstSymbolNode,
+  queryTerms: string[],
+  allNodes: AstSymbolNode[] = [],
+  roleIntents: { wantsDocs: boolean; wantsTests: boolean } = { wantsDocs: false, wantsTests: false },
+): number {
   if (queryTerms.length === 0) return 0;
   const totalNodes = Math.max(1, allNodes.length);
 
@@ -241,61 +347,85 @@ export function scoreNodeRelevance(node: AstSymbolNode, queryTerms: string[], al
   }
 
   const haystackName = node.name.toLowerCase();
+  const shortName = haystackName.includes('.') ? haystackName.split('.').pop()! : haystackName;
   const haystackPath = node.filePath.toLowerCase();
   const haystackDoc = node.docComment.toLowerCase();
   const haystackBody = node.fullCode.toLowerCase();
 
   let score = 0;
-  // CJK 權重調整因子：中文/日文/韓文匹配略高於ASCII
+  let matchedTerms = 0;
   const isCjkMatch = /[一-鿿぀-ゟ゠-ヿ가-힯]/.test(queryTerms.join(''));
 
   for (const term of queryTerms) {
     const df = termDF.get(term) || 1;
     const idf = Math.log(1 + (totalNodes / df));
-    // 關鍵字稀缺度加權（TF-IDF 式防噪）：若詞頻過高（出現在 >30% 檔案中），大幅降權；專有名詞大幅加權
     const scarcityMultiplier = df / totalNodes > 0.3 ? 0.35 : df / totalNodes > 0.15 ? 0.7 : 1.25;
 
     let termScore = 0;
-    // 1. 名稱精確匹配（遠高於內文出現次數）
-    if (haystackName === term) {
-      termScore += isCjkMatch ? 36 : 32;  // CJK: 36, ASCII: 32
-    }
-    else if (haystackName.includes(term)) {
-      termScore += isCjkMatch ? 22 : 20;  // CJK: 22, ASCII: 20
+    let termHit = false;
+    // 1. 名稱精確匹配（含 Method 短名精確匹配如 Timeout.__init__ 命中 __init__）
+    if (haystackName === term || shortName === term) {
+      termScore += isCjkMatch ? 46 : 44;
+      termHit = true;
+    } else if (haystackName.includes(term)) {
+      termScore += isCjkMatch ? 24 : 22;
+      termHit = true;
     }
 
     // 2. 路徑匹配
     if (haystackPath.includes(term)) {
       termScore += isCjkMatch ? 10 : 8;
+      termHit = true;
     }
 
     // 3. 註解/Docstring 匹配
     if (haystackDoc.includes(term)) {
       termScore += isCjkMatch ? 8 : 6;
+      termHit = true;
     }
 
     // 4. 函式體內文本語義匹配 (BM25-like saturation)
     const occ = haystackBody.split(term).length - 1;
     if (occ > 0) {
-      termScore += Math.min(10, 2.5 * Math.log1p(occ));
+      termScore += Math.min(12, 3 * Math.log1p(occ));
+      termHit = true;
     }
 
+    if (termHit) matchedTerms++;
     score += termScore * idf * scarcityMultiplier;
   }
 
-  // 5. 偏好函式/方法
+  if (matchedTerms >= 2) {
+    score *= 1 + 0.35 * (matchedTerms - 1);
+  }
+
+  // 5. 偏好函式/方法/類別定義
   if (score > 0 && (node.kind === 'function' || node.kind === 'method')) {
-    score *= isCjkMatch ? 1.08 : 1.15;  // CJK: 1.08x, ASCII: 1.15x
+    score *= isCjkMatch ? 1.1 : 1.18;
+  } else if (score > 0 && (node.kind === 'class' || node.kind === 'interface' || node.kind === 'type')) {
+    score *= 1.08;
   }
 
   // 6. CJK 中英雙語查詢加成
   if (isCjkMatch) {
-    const englishTerms = queryTerms.filter(t => /^[a-z0-9_]+$/.test(t));
+    const englishTerms = queryTerms.filter((t) => /^[a-z0-9_]+$/.test(t));
     if (englishTerms.length > 0) {
-      const hasEnglishMatch = englishTerms.some(eTerm => 
-        haystackName.includes(eTerm) || haystackDoc.includes(eTerm)
+      const hasEnglishMatch = englishTerms.some(
+        (eTerm) => haystackName.includes(eTerm) || haystackDoc.includes(eTerm),
       );
-      if (hasEnglishMatch) score *= 1.10;  // 雙語匹配加成 10%
+      if (hasEnglishMatch) score *= 1.1;
+    }
+  }
+
+  // 7. File-role weighting: penalize docs & tests unless explicitly requested
+  if (score > 0) {
+    const role = classifyFileRole(node.filePath);
+    if (role === 'doc' && !roleIntents.wantsDocs) {
+      score *= 0.1;
+    } else if (role === 'test' && !roleIntents.wantsTests) {
+      score *= 0.2;
+    } else if (role === 'source') {
+      score *= 1.25;
     }
   }
 
@@ -639,17 +769,17 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
   }
 
   const queryTerms = expandQueryTerms(query);
+  const roleIntents = getQueryRoleIntents(query);
 
-  // Precompute ±40-line local windows for >200-line plain-text config files
+  // Precompute ±40-line local windows for >200-line plain-text config files & compact windows for Markdown/doc files
   const configWindowByNodeId = new Map<string, ConfigWindowSlice>();
   for (const node of nodes) {
-    if (
-      node.kind === 'module' &&
-      node.lineCount > 200 &&
-      PLAIN_TEXT_CONFIG_EXT_RE.test(node.filePath)
-    ) {
-      const win = slicePlainTextConfigWindow(node.fullCode, queryTerms);
-      if (win) {
+    if (node.kind === 'module') {
+      if (node.lineCount > 200 && PLAIN_TEXT_CONFIG_EXT_RE.test(node.filePath)) {
+        const win = slicePlainTextConfigWindow(node.fullCode, queryTerms);
+        if (win) configWindowByNodeId.set(node.id, win);
+      } else if (DOC_EXT_RE.test(node.filePath) && node.lineCount > 45) {
+        const win = sliceDocWindow(node.fullCode, queryTerms, 16, 480);
         configWindowByNodeId.set(node.id, win);
       }
     }
@@ -657,28 +787,96 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
 
   const getEffectiveRawTokens = (node: AstSymbolNode) =>
     configWindowByNodeId.get(node.id)?.tokens ?? node.rawTokens;
+  const getEffectiveSkelTokens = (node: AstSymbolNode) =>
+    DOC_EXT_RE.test(node.filePath)
+      ? Math.min(node.skeletonTokens, configWindowByNodeId.get(node.id)?.tokens ?? node.skeletonTokens)
+      : node.skeletonTokens;
 
-  // 1. Score all nodes with TF-IDF scarcity weighting
+  // 1. Score all nodes with TF-IDF scarcity weighting + file-role weighting
   const scores = new Map<string, number>();
   for (const node of nodes) {
-    scores.set(node.id, scoreNodeRelevance(node, queryTerms, nodes));
+    scores.set(node.id, scoreNodeRelevance(node, queryTerms, nodes, roleIntents));
   }
 
-  // 2. Determine focal nodes (pinned takes precedence, else top TF-IDF matches; NO arbitrary fallback on 0-match queries)
+  const hasSourceMatches = nodes.some(
+    (n) => classifyFileRole(n.filePath) === 'source' && (scores.get(n.id) ?? 0) > 0,
+  );
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
+
+  // 2. Determine focal nodes (pinned takes precedence, else core source TF-IDF matches first)
   let focalIds: string[] = [...validPinnedIds];
+  const promotedParentClassIds = new Set<string>();
 
   if (focalIds.length === 0 && queryTerms.length > 0) {
-    const ranked = [...nodes]
-      .map((n) => ({ id: n.id, score: scores.get(n.id) ?? 0 }))
+    const rankedAll = [...nodes]
+      .map((n) => ({
+        node: n,
+        id: n.id,
+        score: scores.get(n.id) ?? 0,
+        role: classifyFileRole(n.filePath),
+      }))
       .filter((r) => r.score > 0)
       .sort((a, b) => b.score - a.score);
 
-    if (ranked.length > 0) {
-      const topScore = ranked[0].score;
-      focalIds = ranked
-        .filter((r, idx) => idx < 2 || r.score >= topScore * 0.72)
-        .slice(0, 3)
+    const eligibleRanked = hasSourceMatches
+      ? rankedAll.filter((r) => r.role === 'source')
+      : rankedAll;
+
+    if (eligibleRanked.length > 0) {
+      const topScore = eligibleRanked[0].score;
+      const candidateFocalIds = eligibleRanked
+        .filter((r, idx) => (idx < 3 && r.score >= topScore * 0.3) || r.score >= topScore * 0.55)
+        .slice(0, 5)
         .map((r) => r.id);
+
+      // Deduplicate parent class vs child methods:
+      // If a large class (>35 lines) has strongly matched child method(s), expand the target method(s)
+      // as <focal> and keep the enclosing class as a structural <skeleton>.
+      const chosenSet = new Set<string>();
+      for (const id of candidateFocalIds) {
+        const node = nodeById.get(id)!;
+        if (node.kind === 'class' && node.lineCount > 35) {
+          const childMethods = nodes.filter(
+            (c) =>
+              c.fileId === node.fileId &&
+              c.kind === 'method' &&
+              c.name.startsWith(`${node.name}.`),
+          );
+          const matchingChildren = childMethods
+            .filter((c) => {
+              const cs = scores.get(c.id) ?? 0;
+              const shortM = c.name.split('.').pop()!.toLowerCase();
+              const explicitMethodHit = queryTerms.some((t) => shortM === t || shortM.includes(t));
+              return explicitMethodHit || cs >= (scores.get(id) ?? 0) * 0.55;
+            })
+            .sort((a, b) => (scores.get(b.id) ?? 0) - (scores.get(a.id) ?? 0));
+
+          if (matchingChildren.length > 0) {
+            promotedParentClassIds.add(id);
+            for (const cm of matchingChildren.slice(0, 3)) {
+              chosenSet.add(cm.id);
+            }
+            continue;
+          }
+        }
+        chosenSet.add(id);
+      }
+
+      // Remove child methods whose parent class remained focal (prevent duplicate code)
+      const finalFocal: string[] = [];
+      for (const id of chosenSet) {
+        const node = nodeById.get(id)!;
+        if (node.kind === 'method') {
+          const clsName = node.name.split('.')[0];
+          const hasFullParent = [...chosenSet].some((pid) => {
+            const p = nodeById.get(pid);
+            return p && p.kind === 'class' && p.fileId === node.fileId && p.name === clsName;
+          });
+          if (hasFullParent) continue;
+        }
+        finalFocal.push(id);
+      }
+      focalIds = finalFocal;
     }
   }
 
@@ -714,19 +912,36 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     }
   }
 
-  // 4. Priority ordering & greedy budget-aware tier assignment (On-Demand Blanking: NO unrelated stuffing)
+  // 4. Two-Pass Priority Ordering (Focal Targets FIRST, then 1/2-hop neighbors, with Doc & Test Caps)
   const plansMap = new Map<string, ComputedNodePlan>();
   const packetOverheadTokens = 95;
   let remainingBudget = Math.max(0, budgetTokens - packetOverheadTokens);
+  const docBudgetCap = hasSourceMatches
+    ? Math.min(2048, Math.floor(budgetTokens * 0.12))
+    : Math.min(6144, Math.floor(budgetTokens * 0.5));
+  const testBudgetCap = hasSourceMatches
+    ? Math.min(3072, Math.floor(budgetTokens * 0.2))
+    : Math.floor(budgetTokens * 0.65);
+  let docBudgetUsed = 0;
+  let testBudgetUsed = 0;
 
+  const roleRank = (role: FileRole) => (role === 'source' ? 0 : role === 'test' ? 1 : 2);
   const prioritySorted = [...nodes].sort((a, b) => {
     const ovA = overrides[a.id] ?? 'auto';
     const ovB = overrides[b.id] ?? 'auto';
     if (ovA === 'full' && ovB !== 'full') return -1;
     if (ovB === 'full' && ovA !== 'full') return 1;
 
-    const hopA = hopMap.get(a.id) ?? 99;
-    const hopB = hopMap.get(b.id) ?? 99;
+    const focA = focalSet.has(a.id) ? 0 : 1;
+    const focB = focalSet.has(b.id) ? 0 : 1;
+    if (focA !== focB) return focA - focB;
+
+    const rrA = roleRank(classifyFileRole(a.filePath));
+    const rrB = roleRank(classifyFileRole(b.filePath));
+    if (rrA !== rrB) return rrA - rrB;
+
+    const hopA = hopMap.get(a.id) ?? (promotedParentClassIds.has(a.id) ? 1 : 99);
+    const hopB = hopMap.get(b.id) ?? (promotedParentClassIds.has(b.id) ? 1 : 99);
     if (hopA !== hopB) return hopA - hopB;
 
     const sA = scores.get(a.id) ?? 0;
@@ -738,12 +953,26 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     return typeB - typeA;
   });
 
+  const isCoveredByFullParent = (node: AstSymbolNode): boolean => {
+    if (node.kind !== 'method') return false;
+    const clsName = node.name.split('.')[0];
+    return [...plansMap.values()].some(
+      (p) =>
+        p.tier === 'full' &&
+        p.node.fileId === node.fileId &&
+        p.node.kind === 'class' &&
+        p.node.name === clsName,
+    );
+  };
+
   for (const node of prioritySorted) {
     const override = overrides[node.id] ?? 'auto';
     const hop = hopMap.has(node.id) ? hopMap.get(node.id)! : null;
     const isFocal = focalSet.has(node.id);
     const relevanceScore = scores.get(node.id) ?? 0;
     const effRawTokens = getEffectiveRawTokens(node);
+    const effSkelTokens = getEffectiveSkelTokens(node);
+    const role = classifyFileRole(node.filePath);
 
     let tier: NodeTier = 'excluded';
     let reason = eng.reasonDefaultExcluded;
@@ -757,32 +986,52 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
       reason = eng.reasonManualFull;
     } else if (override === 'skeleton') {
       tier = 'skeleton';
-      remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
+      remainingBudget = Math.max(0, remainingBudget - effSkelTokens);
       reason = eng.reasonManualSkeleton;
-    } else {
-      // Strictly include ONLY focal targets, 1/2-hop neighbors, and same-file types/constants
+    } else if (!isCoveredByFullParent(node)) {
+      // Strictly include ONLY focal targets, enclosing class outlines for focal methods,
+      // 1/2-hop neighbors, and same-file types/constants
+      const canConsumeRoleBudget = (cost: number) => {
+        if (role === 'doc') return docBudgetUsed + cost <= docBudgetCap;
+        if (role === 'test') return testBudgetUsed + cost <= testBudgetCap;
+        return true;
+      };
+      const recordRoleBudget = (cost: number) => {
+        if (role === 'doc') docBudgetUsed += cost;
+        else if (role === 'test') testBudgetUsed += cost;
+      };
+
       if (isFocal) {
         if (effRawTokens <= remainingBudget || remainingBudget === budgetTokens - packetOverheadTokens) {
           tier = 'full';
           remainingBudget = Math.max(0, remainingBudget - effRawTokens);
+          recordRoleBudget(effRawTokens);
           reason = eng.reasonFocalFull;
-        } else if (node.skeletonTokens <= remainingBudget) {
+        } else if (effSkelTokens <= remainingBudget) {
           tier = 'skeleton';
-          remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
+          remainingBudget = Math.max(0, remainingBudget - effSkelTokens);
+          recordRoleBudget(effSkelTokens);
           reason = eng.reasonFocalSkeleton;
         } else {
           tier = 'map';
           remainingBudget = Math.max(0, remainingBudget - node.mapTokens);
+          recordRoleBudget(node.mapTokens);
           reason = eng.reasonFocalMap;
         }
+      } else if (promotedParentClassIds.has(node.id) && effSkelTokens <= remainingBudget) {
+        tier = 'skeleton';
+        remainingBudget = Math.max(0, remainingBudget - effSkelTokens);
+        reason = eng.reasonHopSkeleton(1);
       } else if (hop !== null && hop <= maxHops) {
-        if (node.skeletonTokens <= remainingBudget) {
+        if (effSkelTokens <= remainingBudget && canConsumeRoleBudget(effSkelTokens)) {
           tier = 'skeleton';
-          remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
+          remainingBudget = Math.max(0, remainingBudget - effSkelTokens);
+          recordRoleBudget(effSkelTokens);
           reason = eng.reasonHopSkeleton(hop);
-        } else if (node.mapTokens <= remainingBudget) {
+        } else if (node.mapTokens <= remainingBudget && canConsumeRoleBudget(node.mapTokens)) {
           tier = 'map';
           remainingBudget = Math.max(0, remainingBudget - node.mapTokens);
+          recordRoleBudget(node.mapTokens);
           reason = eng.reasonHopMap(hop);
         }
       } else if (
@@ -792,10 +1041,10 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
             (node.exported || /^[A-Z][A-Z0-9_]+$/.test(node.name)) &&
             node.lineCount <= 25)) &&
         focalIds.some((fid) => nodes.find((x) => x.id === fid)?.fileId === node.fileId) &&
-        node.skeletonTokens <= remainingBudget
+        effSkelTokens <= remainingBudget
       ) {
         tier = 'skeleton';
-        remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
+        remainingBudget = Math.max(0, remainingBudget - effSkelTokens);
         reason = eng.reasonSameFileType;
       }
       // On-demand blanking: leave remaining budget unused instead of stuffing unrelated symbols
@@ -805,7 +1054,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
       tier === 'full'
         ? effRawTokens
         : tier === 'skeleton'
-          ? node.skeletonTokens
+          ? effSkelTokens
           : tier === 'map'
             ? node.mapTokens
             : 0;
@@ -998,7 +1247,12 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
   const headerByFile = new Map<string, { endLine: number; header: string }>();
   for (const fileId of seenFileIds) {
     const file = fileById.get(fileId);
-    if (!file || PLAIN_TEXT_CONFIG_EXT_RE.test(file.path)) continue;
+    if (!file || PLAIN_TEXT_CONFIG_EXT_RE.test(file.path) || DOC_EXT_RE.test(file.path)) continue;
+    // Prevent duplicate header when a module skeleton starting at line 1 is already emitted
+    const hasStart1ModuleSkel = skeletonBlocks.some(
+      (p) => p.node.fileId === fileId && p.node.kind === 'module' && p.node.startLine === 1,
+    );
+    if (hasStart1ModuleSkel) continue;
     const hdr = extractFileHeader(file.content);
     if (!hdr) continue;
     const coveredEnd = fullStart1EndLine.get(fileId) ?? 0;
@@ -1009,7 +1263,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
   const footerByFile = new Map<string, { startLine: number; endLine: number; footer: string; chunks: FileFooterChunk[] }>();
   for (const fileId of seenFileIds) {
     const file = fileById.get(fileId);
-    if (!file || PLAIN_TEXT_CONFIG_EXT_RE.test(file.path)) continue;
+    if (!file || PLAIN_TEXT_CONFIG_EXT_RE.test(file.path) || DOC_EXT_RE.test(file.path)) continue;
     const hasUnfullNode = nodePlans.some((p) => p.node.fileId === fileId && p.tier !== 'full');
     const ranges = coveredRangesByFile.get(fileId) ?? [];
     const wholeFileCovered = ranges.some(([s, e]) => s <= 1 && e >= file.lineCount);
@@ -1042,7 +1296,15 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     const file = fileById.get(fileId);
     if (!file) continue;
     const fileFulls = fullBlocks.filter((p) => p.node.fileId === fileId);
-    const fileSkels = skeletonBlocks.filter((p) => p.node.fileId === fileId);
+    const rawFileSkels = skeletonBlocks.filter((p) => p.node.fileId === fileId);
+    const presentClassNames = new Set(
+      [...fileFulls, ...rawFileSkels]
+        .filter((p) => p.node.kind === 'class')
+        .map((p) => p.node.name),
+    );
+    const fileSkels = rawFileSkels.filter(
+      (p) => !(p.node.kind === 'method' && presentClassNames.has(p.node.name.split('.')[0])),
+    );
     const hdr = headerByFile.get(fileId);
     const ftr = footerByFile.get(fileId);
 
@@ -1082,10 +1344,28 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
       const p = entry.plan;
       const win = configWindowByNodeId.get(p.node.id);
       if (entry.kind === 'skeleton') {
+        let skelBody = win ? win.windowedCode : p.node.skeletonCode;
+        if (!win && p.node.kind === 'class' && file.language === 'python') {
+          const expandedChildRanges = fileFulls
+            .filter(
+              (fp) =>
+                fp.node.kind === 'method' &&
+                fp.node.name.startsWith(`${p.node.name}.`),
+            )
+            .map((fp) => ({
+              name: fp.node.name,
+              startLine: fp.node.startLine,
+              endLine: fp.node.endLine,
+            }));
+          if (expandedChildRanges.length > 0) {
+            skelBody = buildPythonClassSkeleton(p.node.fullCode, p.node.startLine, expandedChildRanges);
+          }
+        }
+        const skelLinesAttr = win ? formatShownLines(win.ranges) : `${p.node.startLine}-${p.node.endLine}`;
         packetSections.push(
-          `    <skeleton symbol="${escapeXmlAttr(p.node.name)}" lines="${p.node.startLine}-${p.node.endLine}" note="${escapeXmlAttr(p.reason)}">`,
+          `    <skeleton symbol="${escapeXmlAttr(p.node.name)}" lines="${skelLinesAttr}" note="${escapeXmlAttr(p.reason)}">`,
         );
-        packetSections.push(win ? win.windowedCode : p.node.skeletonCode);
+        packetSections.push(skelBody);
         packetSections.push('    </skeleton>');
       } else {
         const tag = p.autoExpanded ? ' autoExpanded="true"' : '';

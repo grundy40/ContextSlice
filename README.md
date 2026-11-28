@@ -1,4 +1,4 @@
-# ContextSlice Studio (`v0.4.0`)
+# ContextSlice Studio (`v0.4.1`)
 
 > **Targeted Structural Code Slicing & 1-Tool MCP Brain Plugin for AI Coding Agents**  
 > Before an LLM reads your codebase, ContextSlice builds a local dependency graph via **structural parsing** — returning a compact **Dual-State File Tree** when queries are empty or miss, preserving **complete implementations only for focal targets**, folding `1-hop` / `2-hop` neighbors into **signature skeletons**, and leaving unused budget blank without padding noise.
@@ -213,6 +213,11 @@ Please recommend the cleanest refactoring approach without breaking upstream cal
 
 ### 8. Changelog
 
+#### `v0.4.1` (2026-11-28)
+- **Focal-First Budget Priority & Doc/Test Downweighting**: Downweighted documentation (`*.md`, `docs/**`, `CHANGELOG*`, `README*`) and test files (`tests/**`, `*_test.*`, `*.test.*`, `*.spec.*`, `test_*.*`) unless explicitly queried, enforced strict focal-first `<focal>` allocation before `hop="1"` skeletons, filtered pure syntax keywords (`class`, `def`, `function`, etc.) when symbol terms are present, and applied per-slice token caps so docs/tests never crowd out core source implementations under tight budgets (`16K`).
+- **Markdown Duplicate Header/Skeleton Fix & Compact Windowing**: Eliminated redundant `<file_header>` emission on `.md` files and module skeletons starting at line 1, and added compact ±16-line local windowing (480-token cap per doc) to prevent huge files like `CHANGELOG.md` from exhausting budget.
+- **Python Method-Level AST/Structural Extraction & Class Skeletons**: Recursively extracts methods inside Python `class_definition` (`ClassName.methodName`) across Web AST, CLI regex, and MCP Tree-sitter WASM; renders full `<focal>` implementations for matched methods while keeping the parent class as a structural `<skeleton>` with attribute summaries and folded unhit sibling methods instead of collapsing the whole class into one line.
+
 #### `v0.4.0` (2026-11-28)
 - **Dual-State File Tree & Strict On-Demand Blanking**: Implemented State A (`mode="file_tree_empty_query"`) and State B (`mode="file_tree_zero_matches"`) with explicit `<note>` anti-hallucination prompts across Web UI, CLI (`ctxslice`), and 1-Tool MCP (`ctxslice-mcp`). Removed unrelated code padding so unused budget stays blank.
 - **Line-Range `<file>` XML Attributes**: Added `total_lines` and `shown_lines` attributes to `<file>` tags across Web UI, CLI, and 1-Tool MCP to prevent large-file boundary hallucinations.
@@ -291,7 +296,7 @@ Released under the [MIT License](./LICENSE).
 > **專為 AI 程式開發打造之精準結構化切片與 1-Tool MCP 大腦外掛**  
 > 在 AI Agent 讀取大型專案前，ContextSlice 透過本地**結構解析（Structural Parsing）**建立依賴呼叫圖——空查詢或未命中時回傳精準防呆的**雙狀態目錄樹**，命中時僅輸出**目標完整程式碼與 1/2-Hop 關聯外框**，剩餘預算直接留白省錢、絕不硬塞無關檔案。
 
-🌐 **Language / 語言**: [English](#contextslice-studio-v040) · **繁體中文**
+🌐 **Language / 語言**: [English](#contextslice-studio-v041) · **繁體中文**
 
 ---
 
@@ -492,6 +497,11 @@ npm run build:cli  # 重新編譯並同步版號至 packages/cli/bin/
 ---
 
 ### 8. 版本更新紀錄（Changelog）
+
+#### `v0.4.1`（2026-11-28）
+- **核心原始碼優先分配 `<focal>` 與文件／測試權重調降**：調降 `*.md`、`docs/**`、`CHANGELOG*`、`README*` 與測試檔（`tests/**`、`*_test.*`、`*.test.*`、`*.spec.*`、`test_*.*`）評分權重，除非明確查詢否則不允許搶佔 `<focal>` 預算；強制 `<focal>` 直接命中原始碼優先於 `hop="1"` 骨架與文件配置預算，並過濾純語法關鍵字（`class`、`def`、`function` 等），徹底解決 `16K` 預算下核心程式碼被文件與測試擠壓折疊的問題。
+- **修復 Markdown 重複輸出 Bug 與文件 Token 上限保護**：修正 `.md` 檔案同時輸出 `<file_header>` 與第 1 行 `<skeleton>` 造成重複兩次的錯誤，並以 ±16 行緊湊視窗與單檔／總體 Token 上限防止 `CHANGELOG.md` 等長文件吞噬大量預算。
+- **細化 Python 方法層級提取與類別結構骨架**：於網頁版解析器、CLI 狀態機與 MCP Tree-sitter WASM 同步遞迴提取 `class` 內部方法（`ClassName.methodName`）；命中特定方法時完整展開該目標方法於 `<focal>`，父類別保留屬性摘要並僅折疊未命中之兄弟方法（標記 `# [expanded in <focal symbol="..."> below]`），不再將整個類別壓成單行註解。
 
 #### `v0.4.0`（2026-11-28）
 - **雙狀態目錄樹防呆與按需留白原則**：於網頁版、CLI（`ctxslice`）與 1-Tool MCP（`ctxslice-mcp`）同步實作狀態 A（`mode="file_tree_empty_query"`）與狀態 B（`mode="file_tree_zero_matches"`）及明確 `<note>` 提示語；命中時嚴格執行按需留白，絕不硬塞無關檔案。

@@ -157,7 +157,13 @@ function extractQueryIntent(rawQuery: string): {
       asciiSet.add(w);
     }
   }
-  const asciiTerms = Array.from(asciiSet);
+  const SYNTAX_KEYWORDS = new Set([
+    'class', 'def', 'function', 'func', 'fn', 'struct', 'interface', 'type', 'enum',
+    'const', 'let', 'var', 'async', 'await', 'import', 'export', 'return',
+  ]);
+  const allAscii = Array.from(asciiSet);
+  const nonSyntaxAscii = allAscii.filter((t) => !SYNTAX_KEYWORDS.has(t));
+  const asciiTerms = nonSyntaxAscii.length > 0 ? nonSyntaxAscii : allAscii;
 
   // Extract CJK chunks after stripping generic conversational glue words
   const strippedCjk = rawLower.replace(CHINESE_GLUE_PATTERN, ' ');
@@ -321,6 +327,27 @@ function scoreSingleNode(
         }
       }
     }
+  }
+
+  if (score <= 0) return null;
+
+  const isDocFile =
+    /\.(md|mdx|rst|adoc|asciidoc)$/i.test(pathLower) ||
+    /(^|\/)(docs?|documentation|wiki|guides?)\//.test(pathLower) ||
+    /(^|\/)(readme|changelog|history|contributing|changes|releases|migration|upgrading|authors|notice|license)([^/]*)$/.test(pathLower);
+  const isTestFile =
+    /(^|\/)(tests?|__tests__|spec|specs|testing|fixtures?|benchmarks?|examples?|samples?)\//.test(pathLower) ||
+    /(\.|_)(test|spec)\.[^/]+$/.test(pathLower) ||
+    /(^|\/)test_[^/]+\.[^/]+$/.test(pathLower);
+  const wantsDocs = /\b(readme|changelog|docs|documentation|markdown)\b|\.md\b|文件|說明/.test(rawLower);
+  const wantsTests = /\b(tests?|specs?|pytest|unittest|jest|vitest)\b|測試/.test(rawLower);
+
+  if (isDocFile && !wantsDocs) {
+    score = Math.round(score * 0.12);
+  } else if (isTestFile && !wantsTests) {
+    score = Math.round(score * 0.22);
+  } else {
+    score = Math.round(score * 1.15);
   }
 
   if (score <= 0) return null;

@@ -73,11 +73,26 @@ export function detectHighComplexityClusters(
       (node.kind === 'interface' || node.kind === 'type') &&
       node.rawTokens <= node.skeletonTokens + 20;
 
+    const isPythonClassWithMethods =
+      node.kind === 'class' &&
+      /\.pyw?$/i.test(node.filePath) &&
+      plans.some(
+        (p) =>
+          p.node.fileId === node.fileId &&
+          p.node.kind === 'method' &&
+          p.node.name.startsWith(`${node.name}.`),
+      );
+    const isDocOrTest =
+      /\.(md|mdx|rst|adoc|txt)$/i.test(node.filePath) ||
+      /(?:^|\/)(?:docs?|documentation|tests?|__tests__|spec)(?:\/|$)/i.test(node.filePath);
+
     if (
       focalSet.has(node.id) ||
       override !== 'auto' ||
       tier === 'full' ||
       isPassiveSignatureOnly ||
+      isPythonClassWithMethods ||
+      isDocOrTest ||
       tokenDelta < 30
     ) {
       continue;

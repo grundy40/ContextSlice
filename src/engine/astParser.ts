@@ -692,6 +692,208 @@ function parseTsJsSymbols(file: CodeFile): AstSymbolNode[] {
   return nodes;
 }
 
+function findPythonSignatureEndIdx(lines: string[], startIdx: number): number {
+  let paren = 0;
+  let bracket = 0;
+  let brace = 0;
+  const maxScan = Math.min(lines.length - 1, startIdx + 25);
+
+  for (let j = startIdx; j <= maxScan; j++) {
+    const raw = lines[j];
+    let k = 0;
+    while (k < raw.length) {
+      const ch = raw[k];
+      if (ch === '#') break;
+      if (ch === '"' || ch === "'") {
+        const quote = ch;
+        k++;
+        while (k < raw.length) {
+          if (raw[k] === '\\') { k += 2; continue; }
+          if (raw[k] === quote) { k++; break; }
+          k++;
+        }
+        continue;
+      }
+      if (ch === '(') paren++;
+      else if (ch === ')') paren = Math.max(0, paren - 1);
+      else if (ch === '[') bracket++;
+      else if (ch === ']') bracket = Math.max(0, bracket - 1);
+      else if (ch === '{') brace++;
+      else if (ch === '}') brace = Math.max(0, brace - 1);
+      k++;
+    }
+    const noComment = raw.replace(/#.*$/, '').trimEnd();
+    if (paren <= 0 && bracket <= 0 && brace <= 0 && noComment.endsWith(':')) {
+      return j;
+    }
+  }
+  return startIdx;
+}
+
+function findPythonBlockEndIdx(lines: string[], sigEndIdx: number, baseIndent: number): number {
+  let end = sigEndIdx;
+  let inTriple: string | null = null;
+
+  for (let j = sigEndIdx + 1; j < lines.length; j++) {
+    const raw = lines[j];
+    const trimmed = raw.trim();
+
+    if (inTriple) {
+      end = j;
+      const occurrences = raw.split(inTriple).length - 1;
+      if (occurrences % 2 === 1) inTriple = null;
+      continue;
+    }
+
+    if (trimmed === '') {
+      end = j;
+      continue;
+    }
+
+    const indent = raw.match(/^\s*/)?.[0].length ?? 0;
+    if (indent <= baseIndent) {
+      break;
+    }
+    end = j;
+
+    const tripleMatch = trimmed.match(/^("""|''')/);
+    if (tripleMatch) {
+      const q = tripleMatch[1];
+      const count = trimmed.split(q).length - 1;
+      if (count % 2 === 1) inTriple = q;
+    }
+  }
+
+  while (end > sigEndIdx && lines[end].trim() === '') {
+    end--;
+  }
+  return end;
+}
+
+export function buildPythonClassSkeleton(
+  fullClassCode: string,
+  classStartLine = 1,
+  expandedMethodRanges: Array<{ name: string; startLine: number; endLine: number }> = [],
+): string {
+  const lines = fullClassCode.split('\n');
+  if (lines.length <= 4) return fullClassCode;
+
+  let classDefRel = 0;
+  while (classDefRel < lines.length && lines[classDefRel].trimStart().startsWith('@')) {
+    classDefRel++;
+  }
+  if (classDefRel >= lines.length) return fullClassCode;
+
+  const classIndent = lines[classDefRel].match(/^\s*/)?.[0].length ?? 0;
+  const classSigEndRel = findPythonSignatureEndIdx(lines, classDefRel);
+  const out: string[] = [];
+
+  for (let i = 0; i <= classSigEndRel; i++) {
+    out.push(lines[i]);
+  }
+
+  let bodyIdx = classSigEndRel + 1;
+  while (bodyIdx < lines.length && lines[bodyIdx].trim() === '') bodyIdx++;
+
+  // Keep concise leading docstring if present
+  if (bodyIdx < lines.length) {
+    const t = lines[bodyIdx].trim();
+    if (t.startsWith('"""') || t.startsWith("'''")) {
+      const q = t.slice(0, 3);
+      if (t.length > 3 && t.slice(3).includes(q)) {
+        out.push(lines[bodyIdx]);
+        bodyIdx++;
+      } else {
+        const docEnd = (() => {
+          for (let j = bodyIdx + 1; j < lines.length; j++) {
+            if (lines[j].includes(q)) return j;
+          }
+          return bodyIdx;
+        })();
+        if (docEnd - bodyIdx <= 4) {
+          for (let j = bodyIdx; j <= docEnd; j++) out.push(lines[j]);
+        } else {
+          out.push(lines[bodyIdx]);
+          out.push(lines[bodyIdx + 1]);
+          const indentStr = lines[bodyIdx].match(/^\s*/)?.[0] ?? '    ';
+          out.push(`${indentStr}... (${docEnd - bodyIdx - 1} docstring lines folded)`);
+          out.push(lines[docEnd]);
+        }
+        bodyIdx = docEnd + 1;
+      }
+    }
+  }
+
+  let methodIndent: number | null = null;
+  let memberCount = 0;
+
+  for (let i = bodyIdx; i < lines.length; i++) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const indent = raw.match(/^\s*/)?.[0].length ?? 0;
+    if (indent <= classIndent) continue;
+
+    if (trimmed.startsWith('@')) {
+      if (methodIndent === null || indent === methodIndent) {
+        // Peek ahead to check if this decorator belongs to a method
+        let k = i + 1;
+        while (k < lines.length && lines[k].trimStart().startsWith('@')) k++;
+        if (k < lines.length && /^(?:async\s+)?def\s+/.test(lines[k].trim())) {
+          if (methodIndent === null) methodIndent = indent;
+          for (let d = i; d < k; d++) out.push(lines[d]);
+          i = k - 1;
+          continue;
+        }
+      }
+    }
+
+    const defMatch = trimmed.match(/^(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+    if (defMatch && (methodIndent === null || indent === methodIndent)) {
+      methodIndent = indent;
+      memberCount++;
+      const mSigEnd = findPythonSignatureEndIdx(lines, i);
+      const mEnd = findPythonBlockEndIdx(lines, mSigEnd, indent);
+      const absStart = classStartLine + i;
+      const absEnd = classStartLine + mEnd;
+      const expandedHit = expandedMethodRanges.find(
+        (r) => r.startLine <= absEnd && r.endLine >= absStart,
+      );
+
+      for (let s = i; s <= mSigEnd; s++) {
+        if (s === mSigEnd) {
+          const folded = Math.max(1, mEnd - mSigEnd);
+          const note = expandedHit
+            ? ` # [expanded in <focal symbol="${expandedHit.name}"> below]`
+            : ` # ... ${folded} lines folded`;
+          out.push(`${lines[s]}${note}`);
+        } else {
+          out.push(lines[s]);
+        }
+      }
+      i = mEnd;
+      continue;
+    }
+
+    // Preserve direct class-level annotations / attributes
+    if (methodIndent === null || indent <= methodIndent) {
+      if (/^[A-Za-z_][A-Za-z0-9_]*\s*(?::[^=]+)?(?:=.*)?$/.test(trimmed)) {
+        out.push(raw);
+        memberCount++;
+      }
+    }
+  }
+
+  if (memberCount === 0) {
+    return lines.length > 4
+      ? `${lines.slice(0, classSigEndRel + 1).join('\n')}\n    # ... ${lines.length - classSigEndRel - 1} lines folded`
+      : fullClassCode;
+  }
+
+  return out.join('\n');
+}
+
 function parsePythonSymbols(file: CodeFile): AstSymbolNode[] {
   const { content, id: fileId, path: filePath } = file;
   const lines = content.split('\n');
@@ -699,53 +901,134 @@ function parsePythonSymbols(file: CodeFile): AstSymbolNode[] {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const match = line.match(/^(async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(\([^)]*\))?.*:/);
+    const match = line.match(/^(async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b/);
     if (match) {
       const kind: SymbolKind = match[1] === 'class' ? 'class' : 'function';
       const name = match[2];
-      const startLine = i + 1;
 
-      let endLine = startLine;
-      for (let j = i + 1; j < lines.length; j++) {
-        const next = lines[j];
-        if (next.trim() === '' || /^\s+/.test(next)) {
-          endLine = j + 1;
-        } else {
-          break;
-        }
+      let startIdx = i;
+      while (startIdx > 0 && /^@[A-Za-z_]/.test(lines[startIdx - 1])) {
+        startIdx--;
       }
-      while (endLine > startLine && lines[endLine - 1].trim() === '') {
-        endLine--;
-      }
+      const startLine = startIdx + 1;
+      const sigEndIdx = findPythonSignatureEndIdx(lines, i);
+      const endIdx = findPythonBlockEndIdx(lines, sigEndIdx, 0);
+      const endLine = endIdx + 1;
 
-      const fullCode = lines.slice(startLine - 1, endLine).join('\n');
+      const fullCode = lines.slice(startIdx, endIdx + 1).join('\n');
       const lineCount = endLine - startLine + 1;
       const refs = extractIdentifiers(fullCode, name);
-      const skeletonCode =
-        lineCount > 3
-          ? `${line}\n    # ... ${lineCount - 1} lines folded`
-          : fullCode;
 
-      nodes.push({
-        id: `${fileId}::${name}@${startLine}`,
-        fileId,
-        filePath,
-        name,
-        qualifiedName: `${filePath.split('/').pop()} › ${name}`,
-        kind,
-        exported: !name.startsWith('_'),
-        startLine,
-        endLine,
-        lineCount,
-        fullCode,
-        skeletonCode,
-        rawTokens: estimateTokens(fullCode),
-        skeletonTokens: estimateTokens(skeletonCode),
-        mapTokens: estimateTokens(`${filePath}:${startLine} ${kind} ${name}`),
-        docComment: '',
-        referencedIdentifiers: refs,
-      });
-      i = endLine - 1;
+      if (kind === 'class') {
+        const classSkeleton = buildPythonClassSkeleton(fullCode, startLine);
+        nodes.push({
+          id: `${fileId}::${name}@${startLine}`,
+          fileId,
+          filePath,
+          name,
+          qualifiedName: `${filePath.split('/').pop()} › ${name}`,
+          kind: 'class',
+          exported: !name.startsWith('_'),
+          startLine,
+          endLine,
+          lineCount,
+          fullCode,
+          skeletonCode: classSkeleton,
+          rawTokens: estimateTokens(fullCode),
+          skeletonTokens: estimateTokens(classSkeleton),
+          mapTokens: estimateTokens(`${filePath}:${startLine} class ${name}`),
+          docComment: '',
+          referencedIdentifiers: refs,
+        });
+
+        // Also extract method-level symbols inside class_definition
+        let methodIndent: number | null = null;
+        for (let mIdx = sigEndIdx + 1; mIdx <= endIdx; mIdx++) {
+          const mLine = lines[mIdx];
+          const mTrimmed = mLine.trim();
+          if (!mTrimmed || mTrimmed.startsWith('#')) continue;
+          const indent = mLine.match(/^\s*/)?.[0].length ?? 0;
+          if (indent <= 0) continue;
+
+          const defMatch = mTrimmed.match(/^(async\s+def|def)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+          if (!defMatch) continue;
+          if (methodIndent === null) methodIndent = indent;
+          if (indent !== methodIndent) continue;
+
+          const methodName = defMatch[2];
+          let mStartIdx = mIdx;
+          while (
+            mStartIdx > sigEndIdx + 1 &&
+            lines[mStartIdx - 1].trimStart().startsWith('@') &&
+            (lines[mStartIdx - 1].match(/^\s*/)?.[0].length ?? 0) === indent
+          ) {
+            mStartIdx--;
+          }
+          const mSigEndIdx = findPythonSignatureEndIdx(lines, mIdx);
+          const mEndIdx = findPythonBlockEndIdx(lines, mSigEndIdx, indent);
+          const mStartLine = mStartIdx + 1;
+          const mEndLine = mEndIdx + 1;
+          const mFull = lines.slice(mStartIdx, mEndIdx + 1).join('\n');
+          const mLineCount = mEndLine - mStartLine + 1;
+          const mRefs = extractIdentifiers(mFull, methodName);
+          const mFolded = Math.max(1, mEndIdx - mSigEndIdx);
+          const indentStr = mLine.match(/^\s*/)?.[0] ?? '    ';
+          const mSigLines = lines.slice(mStartIdx, mSigEndIdx + 1).join('\n');
+          const mSkel =
+            mEndIdx - mSigEndIdx > 2
+              ? `${mSigLines}\n${indentStr}    # ... ${mFolded} lines folded`
+              : mFull;
+
+          nodes.push({
+            id: `${fileId}::${name}.${methodName}@${mStartLine}`,
+            fileId,
+            filePath,
+            name: `${name}.${methodName}`,
+            qualifiedName: `${name}.${methodName}`,
+            kind: 'method',
+            exported: !name.startsWith('_') && !methodName.startsWith('_'),
+            startLine: mStartLine,
+            endLine: mEndLine,
+            lineCount: mLineCount,
+            fullCode: mFull,
+            skeletonCode: mSkel,
+            rawTokens: estimateTokens(mFull),
+            skeletonTokens: estimateTokens(mSkel),
+            mapTokens: estimateTokens(`${filePath}:${mStartLine} method ${name}.${methodName}`),
+            docComment: '',
+            referencedIdentifiers: mRefs,
+          });
+          mIdx = mEndIdx;
+        }
+      } else {
+        const sigText = lines.slice(startIdx, sigEndIdx + 1).join('\n');
+        const skeletonCode =
+          endIdx - sigEndIdx > 2
+            ? `${sigText}\n    # ... ${endIdx - sigEndIdx} lines folded`
+            : fullCode;
+
+        nodes.push({
+          id: `${fileId}::${name}@${startLine}`,
+          fileId,
+          filePath,
+          name,
+          qualifiedName: `${filePath.split('/').pop()} › ${name}`,
+          kind,
+          exported: !name.startsWith('_'),
+          startLine,
+          endLine,
+          lineCount,
+          fullCode,
+          skeletonCode,
+          rawTokens: estimateTokens(fullCode),
+          skeletonTokens: estimateTokens(skeletonCode),
+          mapTokens: estimateTokens(`${filePath}:${startLine} ${kind} ${name}`),
+          docComment: '',
+          referencedIdentifiers: refs,
+        });
+      }
+
+      i = endIdx;
       continue;
     }
 
