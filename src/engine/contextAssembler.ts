@@ -321,6 +321,28 @@ function sliceDocWindow(
   };
 }
 
+function countNodeMatchedTerms(node: AstSymbolNode, queryTerms: string[]): number {
+  if (queryTerms.length === 0) return 0;
+  const haystackName = node.name.toLowerCase();
+  const shortName = haystackName.includes('.') ? haystackName.split('.').pop()! : haystackName;
+  const haystackPath = node.filePath.toLowerCase();
+  const haystackDoc = node.docComment.toLowerCase();
+  const haystackBody = node.fullCode.toLowerCase();
+  let matched = 0;
+  for (const term of queryTerms) {
+    if (
+      haystackName.includes(term) ||
+      shortName.includes(term) ||
+      haystackPath.includes(term) ||
+      haystackDoc.includes(term) ||
+      haystackBody.includes(term)
+    ) {
+      matched++;
+    }
+  }
+  return matched;
+}
+
 export function scoreNodeRelevance(
   node: AstSymbolNode,
   queryTerms: string[],
@@ -794,14 +816,21 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
 
   // 1. Score all nodes with TF-IDF scarcity weighting + file-role weighting
   const scores = new Map<string, number>();
+  const matchedTermsById = new Map<string, number>();
   for (const node of nodes) {
     scores.set(node.id, scoreNodeRelevance(node, queryTerms, nodes, roleIntents));
+    matchedTermsById.set(node.id, countNodeMatchedTerms(node, queryTerms));
   }
 
   const hasSourceMatches = nodes.some(
     (n) => classifyFileRole(n.filePath) === 'source' && (scores.get(n.id) ?? 0) > 0,
   );
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  const isChildMethodOf = (child: AstSymbolNode, parent: AstSymbolNode): boolean =>
+    child.fileId === parent.fileId &&
+    child.kind === 'method' &&
+    (child.name.startsWith(`${parent.name}.`) ||
+      (child.startLine > parent.startLine && child.endLine <= parent.endLine));
 
   // 2. Determine focal nodes (pinned takes precedence, else core source TF-IDF matches first)
   let focalIds: string[] = [...validPinnedIds];
@@ -836,12 +865,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
       for (const id of candidateFocalIds) {
         const node = nodeById.get(id)!;
         if (node.kind === 'class' && node.lineCount > 35) {
-          const childMethods = nodes.filter(
-            (c) =>
-              c.fileId === node.fileId &&
-              c.kind === 'method' &&
-              c.name.startsWith(`${node.name}.`),
-          );
+          const childMethods = nodes.filter((c) => isChildMethodOf(c, node));
           const matchingChildren = childMethods
             .filter((c) => {
               const cs = scores.get(c.id) ?? 0;
@@ -853,7 +877,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
 
           if (matchingChildren.length > 0) {
             promotedParentClassIds.add(id);
-            for (const cm of matchingChildren.slice(0, 3)) {
+            for (const cm of matchingChildren.slice(0, 4)) {
               chosenSet.add(cm.id);
             }
             continue;
@@ -867,10 +891,9 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
       for (const id of chosenSet) {
         const node = nodeById.get(id)!;
         if (node.kind === 'method') {
-          const clsName = node.name.split('.')[0];
           const hasFullParent = [...chosenSet].some((pid) => {
             const p = nodeById.get(pid);
-            return p && p.kind === 'class' && p.fileId === node.fileId && p.name === clsName;
+            return Boolean(p && p.kind === 'class' && isChildMethodOf(node, p));
           });
           if (hasFullParent) continue;
         }
@@ -912,7 +935,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     }
   }
 
-  // 4. Two-Pass Priority Ordering (Focal Targets FIRST, then 1/2-hop neighbors, with Doc & Test Caps)
+  // 4. Two-Pass Priority Ordering (Focal Targets FIRST, then 1-hop/direct core, then capped peripheral hop >= 2)
   const plansMap = new Map<string, ComputedNodePlan>();
   const packetOverheadTokens = 95;
   let remainingBudget = Math.max(0, budgetTokens - packetOverheadTokens);
@@ -922,8 +945,54 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
   const testBudgetCap = hasSourceMatches
     ? Math.min(3072, Math.floor(budgetTokens * 0.2))
     : Math.floor(budgetTokens * 0.65);
+  const peripheralBudgetCap =
+    budgetTokens <= 16384 ? Math.floor(budgetTokens * 0.25) : Math.floor(budgetTokens * 0.3);
   let docBudgetUsed = 0;
   let testBudgetUsed = 0;
+  let peripheralBudgetUsed = 0;
+
+  const fileByIdPre = new Map(workspace.files.map((f) => [f.id, f]));
+  const fileHeaderTokenCache = new Map<string, number>();
+  for (const f of workspace.files) {
+    if (PLAIN_TEXT_CONFIG_EXT_RE.test(f.path) || DOC_EXT_RE.test(f.path)) continue;
+    const hdr = extractFileHeader(f.content);
+    if (hdr) fileHeaderTokenCache.set(f.id, estimateTokens(hdr.header) + 12);
+  }
+
+  const focalFileIds = new Set(focalIds.map((fid) => nodeById.get(fid)?.fileId).filter(Boolean) as string[]);
+  const directCoreFileIds = new Set<string>(focalFileIds);
+  for (const pid of promotedParentClassIds) {
+    const fId = nodeById.get(pid)?.fileId;
+    if (fId) directCoreFileIds.add(fId);
+  }
+  const minDirectTerms = Math.min(2, Math.max(1, queryTerms.length));
+  for (const n of nodes) {
+    if (classifyFileRole(n.filePath) !== 'source') continue;
+    const hop = hopMap.get(n.id);
+    const mt = matchedTermsById.get(n.id) ?? 0;
+    const isDirectCallable =
+      hop === 1 && (n.kind === 'function' || n.kind === 'method' || n.kind === 'class');
+    if ((queryTerms.length >= 2 && mt >= minDirectTerms) || isDirectCallable) {
+      directCoreFileIds.add(n.fileId);
+    }
+  }
+
+  const isPeripheralNode = (n: AstSymbolNode): boolean => {
+    if (focalSet.has(n.id) || promotedParentClassIds.has(n.id)) return false;
+    if (focalFileIds.has(n.fileId)) return false;
+    const hop = hopMap.get(n.id);
+    const mt = matchedTermsById.get(n.id) ?? 0;
+    if (hop !== undefined && hop >= 2) return true;
+    if (!directCoreFileIds.has(n.fileId)) return true;
+    if (
+      (n.kind === 'interface' || n.kind === 'type' || n.kind === 'const') &&
+      mt <= 1 &&
+      hop === undefined
+    ) {
+      return true;
+    }
+    return false;
+  };
 
   const roleRank = (role: FileRole) => (role === 'source' ? 0 : role === 'test' ? 1 : 2);
   const prioritySorted = [...nodes].sort((a, b) => {
@@ -936,9 +1005,21 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     const focB = focalSet.has(b.id) ? 0 : 1;
     if (focA !== focB) return focA - focB;
 
+    const parA = promotedParentClassIds.has(a.id) ? 0 : 1;
+    const parB = promotedParentClassIds.has(b.id) ? 0 : 1;
+    if (parA !== parB) return parA - parB;
+
     const rrA = roleRank(classifyFileRole(a.filePath));
     const rrB = roleRank(classifyFileRole(b.filePath));
     if (rrA !== rrB) return rrA - rrB;
+
+    const perA = isPeripheralNode(a) ? 1 : 0;
+    const perB = isPeripheralNode(b) ? 1 : 0;
+    if (perA !== perB) return perA - perB;
+
+    const mtA = matchedTermsById.get(a.id) ?? 0;
+    const mtB = matchedTermsById.get(b.id) ?? 0;
+    if (mtA !== mtB) return mtB - mtA;
 
     const hopA = hopMap.get(a.id) ?? (promotedParentClassIds.has(a.id) ? 1 : 99);
     const hopB = hopMap.get(b.id) ?? (promotedParentClassIds.has(b.id) ? 1 : 99);
@@ -953,15 +1034,17 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     return typeB - typeA;
   });
 
+  const headerChargedFileIds = new Set<string>();
+  const getHeaderReserve = (node: AstSymbolNode): number => {
+    if (headerChargedFileIds.has(node.fileId)) return 0;
+    if (node.kind === 'module' && node.startLine === 1) return 0;
+    return fileHeaderTokenCache.get(node.fileId) ?? 0;
+  };
+
   const isCoveredByFullParent = (node: AstSymbolNode): boolean => {
     if (node.kind !== 'method') return false;
-    const clsName = node.name.split('.')[0];
     return [...plansMap.values()].some(
-      (p) =>
-        p.tier === 'full' &&
-        p.node.fileId === node.fileId &&
-        p.node.kind === 'class' &&
-        p.node.name === clsName,
+      (p) => p.tier === 'full' && p.node.kind === 'class' && isChildMethodOf(node, p.node),
     );
   };
 
@@ -973,6 +1056,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     const effRawTokens = getEffectiveRawTokens(node);
     const effSkelTokens = getEffectiveSkelTokens(node);
     const role = classifyFileRole(node.filePath);
+    const peripheral = isPeripheralNode(node);
 
     let tier: NodeTier = 'excluded';
     let reason = eng.reasonDefaultExcluded;
@@ -982,15 +1066,17 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
       reason = eng.reasonManualExclude;
     } else if (override === 'full') {
       tier = 'full';
-      remainingBudget = Math.max(0, remainingBudget - effRawTokens);
+      const hdrCost = getHeaderReserve(node);
+      remainingBudget = Math.max(0, remainingBudget - effRawTokens - Math.min(remainingBudget, hdrCost));
+      if (hdrCost > 0) headerChargedFileIds.add(node.fileId);
       reason = eng.reasonManualFull;
     } else if (override === 'skeleton') {
       tier = 'skeleton';
-      remainingBudget = Math.max(0, remainingBudget - effSkelTokens);
+      const hdrCost = getHeaderReserve(node);
+      remainingBudget = Math.max(0, remainingBudget - effSkelTokens - Math.min(remainingBudget, hdrCost));
+      if (hdrCost > 0) headerChargedFileIds.add(node.fileId);
       reason = eng.reasonManualSkeleton;
     } else if (!isCoveredByFullParent(node)) {
-      // Strictly include ONLY focal targets, enclosing class outlines for focal methods,
-      // 1/2-hop neighbors, and same-file types/constants
       const canConsumeRoleBudget = (cost: number) => {
         if (role === 'doc') return docBudgetUsed + cost <= docBudgetCap;
         if (role === 'test') return testBudgetUsed + cost <= testBudgetCap;
@@ -1000,16 +1086,30 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
         if (role === 'doc') docBudgetUsed += cost;
         else if (role === 'test') testBudgetUsed += cost;
       };
+      const hdrCost = getHeaderReserve(node);
+      const canConsumePeripheral = (cost: number) =>
+        !peripheral || peripheralBudgetUsed + cost + hdrCost <= peripheralBudgetCap;
+      const recordPeripheral = (cost: number) => {
+        if (peripheral) peripheralBudgetUsed += cost + hdrCost;
+      };
 
       if (isFocal) {
         if (effRawTokens <= remainingBudget || remainingBudget === budgetTokens - packetOverheadTokens) {
           tier = 'full';
           remainingBudget = Math.max(0, remainingBudget - effRawTokens);
+          if (hdrCost > 0 && hdrCost <= remainingBudget) {
+            remainingBudget -= hdrCost;
+            headerChargedFileIds.add(node.fileId);
+          }
           recordRoleBudget(effRawTokens);
           reason = eng.reasonFocalFull;
         } else if (effSkelTokens <= remainingBudget) {
           tier = 'skeleton';
           remainingBudget = Math.max(0, remainingBudget - effSkelTokens);
+          if (hdrCost > 0 && hdrCost <= remainingBudget) {
+            remainingBudget -= hdrCost;
+            headerChargedFileIds.add(node.fileId);
+          }
           recordRoleBudget(effSkelTokens);
           reason = eng.reasonFocalSkeleton;
         } else {
@@ -1020,15 +1120,26 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
         }
       } else if (promotedParentClassIds.has(node.id) && effSkelTokens <= remainingBudget) {
         tier = 'skeleton';
-        remainingBudget = Math.max(0, remainingBudget - effSkelTokens);
+        remainingBudget -= effSkelTokens;
+        if (hdrCost > 0 && hdrCost <= remainingBudget) {
+          remainingBudget -= hdrCost;
+          headerChargedFileIds.add(node.fileId);
+        }
         reason = eng.reasonHopSkeleton(1);
       } else if (hop !== null && hop <= maxHops) {
-        if (effSkelTokens <= remainingBudget && canConsumeRoleBudget(effSkelTokens)) {
+        const totalSkelCost = effSkelTokens + hdrCost;
+        if (totalSkelCost <= remainingBudget && canConsumeRoleBudget(effSkelTokens) && canConsumePeripheral(effSkelTokens)) {
           tier = 'skeleton';
-          remainingBudget = Math.max(0, remainingBudget - effSkelTokens);
+          remainingBudget -= totalSkelCost;
+          if (hdrCost > 0) headerChargedFileIds.add(node.fileId);
           recordRoleBudget(effSkelTokens);
+          recordPeripheral(effSkelTokens);
           reason = eng.reasonHopSkeleton(hop);
-        } else if (node.mapTokens <= remainingBudget && canConsumeRoleBudget(node.mapTokens)) {
+        } else if (
+          !peripheral &&
+          node.mapTokens <= remainingBudget &&
+          canConsumeRoleBudget(node.mapTokens)
+        ) {
           tier = 'map';
           remainingBudget = Math.max(0, remainingBudget - node.mapTokens);
           recordRoleBudget(node.mapTokens);
@@ -1040,11 +1151,14 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
           (node.kind === 'const' &&
             (node.exported || /^[A-Z][A-Z0-9_]+$/.test(node.name)) &&
             node.lineCount <= 25)) &&
-        focalIds.some((fid) => nodes.find((x) => x.id === fid)?.fileId === node.fileId) &&
-        effSkelTokens <= remainingBudget
+        focalIds.some((fid) => nodeById.get(fid)?.fileId === node.fileId) &&
+        effSkelTokens + hdrCost <= remainingBudget &&
+        canConsumePeripheral(effSkelTokens)
       ) {
         tier = 'skeleton';
-        remainingBudget = Math.max(0, remainingBudget - effSkelTokens);
+        remainingBudget -= effSkelTokens + hdrCost;
+        if (hdrCost > 0) headerChargedFileIds.add(node.fileId);
+        recordPeripheral(effSkelTokens);
         reason = eng.reasonSameFileType;
       }
       // On-demand blanking: leave remaining budget unused instead of stuffing unrelated symbols
@@ -1264,6 +1378,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
   for (const fileId of seenFileIds) {
     const file = fileById.get(fileId);
     if (!file || PLAIN_TEXT_CONFIG_EXT_RE.test(file.path) || DOC_EXT_RE.test(file.path)) continue;
+    if (!directCoreFileIds.has(fileId)) continue;
     const hasUnfullNode = nodePlans.some((p) => p.node.fileId === fileId && p.tier !== 'full');
     const ranges = coveredRangesByFile.get(fileId) ?? [];
     const wholeFileCovered = ranges.some(([s, e]) => s <= 1 && e >= file.lineCount);
@@ -1297,13 +1412,17 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     if (!file) continue;
     const fileFulls = fullBlocks.filter((p) => p.node.fileId === fileId);
     const rawFileSkels = skeletonBlocks.filter((p) => p.node.fileId === fileId);
-    const presentClassNames = new Set(
-      [...fileFulls, ...rawFileSkels]
-        .filter((p) => p.node.kind === 'class')
-        .map((p) => p.node.name),
-    );
+    const fullClasses = fileFulls.filter((p) => p.node.kind === 'class').map((p) => p.node);
+    const structuralClasses = [...fileFulls, ...rawFileSkels]
+      .filter((p) => p.node.kind === 'class' && (p.tier === 'full' || file.language === 'python' || !p.node.skeletonCode.includes('lines folded */ }')))
+      .map((p) => p.node);
     const fileSkels = rawFileSkels.filter(
-      (p) => !(p.node.kind === 'method' && presentClassNames.has(p.node.name.split('.')[0])),
+      (p) =>
+        !(
+          p.node.kind === 'method' &&
+          (fullClasses.some((cls) => isChildMethodOf(p.node, cls)) ||
+            structuralClasses.some((cls) => isChildMethodOf(p.node, cls)))
+        ),
     );
     const hdr = headerByFile.get(fileId);
     const ftr = footerByFile.get(fileId);

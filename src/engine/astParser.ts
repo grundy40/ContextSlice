@@ -331,9 +331,37 @@ function buildTsJsClassSkeleton(
       i++;
       continue;
     }
-    // Field or property signature without method block
+    // Class field arrow function / function expression (e.g., text: TextRespond = (...) => { ... })
+    const arrowFieldMatch = trimmed.match(
+      /^(?:(?:public|private|protected|readonly|static|override|abstract|declare|async)\s+)*([A-Za-z_$#][A-Za-z0-9_$]*)\s*[?!]?\s*(?::[^=]+)?=/,
+    );
+    if (arrowFieldMatch) {
+      let sigBuffer = line;
+      let j = i;
+      while (j < lines.length && j - i < 8 && !sigBuffer.includes('=>') && !/\bfunction\b/.test(sigBuffer) && !trimmed.endsWith(';')) {
+        j++;
+        if (j < lines.length) sigBuffer += '\n' + lines[j];
+      }
+      const arrowOrFnIdx = sigBuffer.indexOf('=>') !== -1 ? sigBuffer.indexOf('=>') : sigBuffer.search(/\bfunction\b/);
+      if (arrowOrFnIdx !== -1) {
+        const lineStartOffset = lines.slice(0, i).join('\n').length + (i > 0 ? 1 : 0);
+        const bodyBraceRel = sigBuffer.indexOf('{', arrowOrFnIdx);
+        if (bodyBraceRel !== -1) {
+          const bracePosInBody = lineStartOffset + bodyBraceRel;
+          const endPos = findMatchingBrace(body, bracePosInBody);
+          const startLineInClass = getLineNumberAt(body, bracePosInBody);
+          const endLineInClass = getLineNumberAt(body, endPos);
+          const foldedCount = Math.max(1, endLineInClass - startLineInClass - 1);
+          const sigOnly = sigBuffer.slice(0, bodyBraceRel).trim();
+          sigLines.push(`  ${sigOnly} { /* ... ${foldedCount} lines folded */ }`);
+          i = endLineInClass;
+          continue;
+        }
+      }
+    }
+    // Field or property signature without function body
     if (
-      /^(?:public|private|protected|readonly|static|\s)*[A-Za-z_$][A-Za-z0-9_$]*\s*[?!]?\s*:\s*[^=]+;/.test(trimmed) &&
+      /^(?:public|private|protected|readonly|static|override|abstract|declare|\s)*[A-Za-z_$#][A-Za-z0-9_$]*\s*[?!]?\s*:\s*[^=]+;/.test(trimmed) &&
       !trimmed.includes('{')
     ) {
       sigLines.push(`  ${trimmed}`);
@@ -342,7 +370,7 @@ function buildTsJsClassSkeleton(
     }
     // Method declaration
     const methodMatch = trimmed.match(
-      /^(?:(public|private|protected|async|static)\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*(<[^>]*>)?\s*\(/,
+      /^(?:(public|private|protected|async|static|override|abstract)\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*(<[^>]*>)?\s*\(/,
     );
     if (methodMatch && !['if', 'for', 'while', 'switch', 'catch'].includes(methodMatch[2])) {
       // Collect signature up to '{'
@@ -608,13 +636,16 @@ function parseTsJsSymbols(file: CodeFile): AstSymbolNode[] {
       referencedIdentifiers: refs,
     });
 
-    // If this is a large class (> 35 lines), also extract its methods for fine-grained intra-class slicing!
-    if (kind === 'class' && lineCount > 35 && blockOpenAbs !== -1) {
+    // If this is a class (> 20 lines), also extract its methods & class-field arrow/function properties!
+    if (kind === 'class' && lineCount > 20 && blockOpenAbs !== -1) {
       const classBodyStartLine = getLineNumberAt(content, blockOpenAbs) + 1;
       for (let ln = classBodyStartLine; ln < endLine; ln++) {
         const rawLine = lines[ln - 1] ?? '';
+        const trimmedMember = rawLine.trim();
+        if (!trimmedMember || trimmedMember.startsWith('//') || trimmedMember.startsWith('/*')) continue;
+
         const methodMatch = rawLine.match(
-          /^\s{2,4}(?:(?:public|private|protected|async|static)\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>]*>)?\s*\([^)]*\)/,
+          /^\s{1,6}(?:(?:public|private|protected|async|static|override|abstract|get|set)\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>]*>)?\s*\(/,
         );
         if (methodMatch && !['if', 'for', 'while', 'switch', 'catch', 'constructor'].includes(methodMatch[1])) {
           const mName = methodMatch[1];
@@ -624,13 +655,16 @@ function parseTsJsSymbols(file: CodeFile): AstSymbolNode[] {
             const mBraceAbs = lineOffsetAbs + mBraceRel;
             const mEndAbs = findMatchingBrace(content, mBraceAbs);
             const mEndLine = getLineNumberAt(content, mEndAbs);
-            if (mEndLine < endLine && mEndLine - ln >= 4) {
+            if (mEndLine < endLine && mEndLine - ln >= 2) {
               const mDoc = extractLeadingDoc(lines, ln);
               const mFull = lines.slice(mDoc.docStartLine - 1, mEndLine).join('\n');
               const mHeader = content.slice(lineOffsetAbs, mBraceAbs).trim();
               const mRefs = extractIdentifiers(mFull, mName);
               const mFolded = Math.max(1, mEndLine - ln - 1);
-              const mSkel = `${mDoc.doc ? mDoc.doc + '\n' : ''}${mHeader} { /* ... ${mFolded} lines folded */ }`;
+              const mSkel =
+                mEndLine - ln >= 4
+                  ? `${mDoc.doc ? mDoc.doc + '\n' : ''}${mHeader} { /* ... ${mFolded} lines folded */ }`
+                  : mFull;
               nodes.push({
                 id: `${fileId}::${name}.${mName}@${mDoc.docStartLine}`,
                 fileId,
@@ -651,6 +685,78 @@ function parseTsJsSymbols(file: CodeFile): AstSymbolNode[] {
                 referencedIdentifiers: mRefs,
               });
               ln = mEndLine;
+              continue;
+            }
+          }
+        }
+
+        // Class field arrow function / function expression:
+        // e.g. `text: TextRespond = (text: string, arg?: ...) => { ... }` or `handler = function(...) { ... }`
+        const fieldArrowMatch = rawLine.match(
+          /^\s{1,6}(?:(?:public|private|protected|readonly|static|override|abstract|declare|async)\s+)*([A-Za-z_$#][A-Za-z0-9_$]*)\s*[?!]?\s*(?::[^=]*)?(?:=|$)/,
+        );
+        if (fieldArrowMatch && !['if', 'for', 'while', 'switch', 'catch', 'return'].includes(fieldArrowMatch[1])) {
+          const mName = fieldArrowMatch[1].replace(/^#/, '');
+          const lineOffsetAbs = lines.slice(0, ln - 1).join('\n').length + (ln > 1 ? 1 : 0);
+          const lookahead = lines.slice(ln - 1, Math.min(endLine - 1, ln + 8)).join('\n');
+          const eqRel = lookahead.indexOf('=');
+          if (eqRel !== -1) {
+            const afterEq = lookahead.slice(eqRel + 1);
+            const arrowRel = afterEq.indexOf('=>');
+            const fnExprMatch = afterEq.match(/\bfunction\b/);
+            const fnRel = fnExprMatch && fnExprMatch.index !== undefined ? fnExprMatch.index : -1;
+            const fnStartRel =
+              arrowRel !== -1 && (fnRel === -1 || arrowRel < fnRel)
+                ? eqRel + 1 + arrowRel
+                : fnRel !== -1
+                  ? eqRel + 1 + fnRel
+                  : -1;
+            if (fnStartRel !== -1) {
+              const fnStartAbs = lineOffsetAbs + fnStartRel;
+              const afterFnSlice = content.slice(fnStartAbs);
+              const mBraceRel = afterFnSlice.indexOf('{');
+              let mEndLine = ln;
+              let mBraceAbs = -1;
+              if (mBraceRel !== -1 && mBraceRel < 240) {
+                mBraceAbs = fnStartAbs + mBraceRel;
+                const mEndAbs = findMatchingBrace(content, mBraceAbs);
+                mEndLine = getLineNumberAt(content, mEndAbs);
+                if (content[mEndAbs + 1] === ';') {
+                  mEndLine = getLineNumberAt(content, mEndAbs + 1);
+                }
+              } else {
+                mEndLine = findStatementEndLine(lines, ln - 1, 'ts') + 1;
+              }
+              if (mEndLine < endLine) {
+                const mDoc = extractLeadingDoc(lines, ln);
+                const mFull = lines.slice(mDoc.docStartLine - 1, mEndLine).join('\n');
+                const mRefs = extractIdentifiers(mFull, mName);
+                const mFolded = Math.max(1, mEndLine - ln - 1);
+                const mSkel =
+                  mBraceAbs !== -1 && mEndLine - ln >= 3
+                    ? `${mDoc.doc ? mDoc.doc + '\n' : ''}${content.slice(lineOffsetAbs, mBraceAbs).trim()} { /* ... ${mFolded} lines folded */ }`
+                    : mFull;
+                nodes.push({
+                  id: `${fileId}::${name}.${mName}@${mDoc.docStartLine}`,
+                  fileId,
+                  filePath,
+                  name: `${name}.${mName}`,
+                  qualifiedName: `${name}.${mName}`,
+                  kind: 'method',
+                  exported,
+                  startLine: mDoc.docStartLine,
+                  endLine: mEndLine,
+                  lineCount: mEndLine - mDoc.docStartLine + 1,
+                  fullCode: mFull,
+                  skeletonCode: mSkel,
+                  rawTokens: estimateTokens(mFull),
+                  skeletonTokens: estimateTokens(mSkel),
+                  mapTokens: estimateTokens(`${filePath}:${mDoc.docStartLine} method ${name}.${mName}`),
+                  docComment: mDoc.doc,
+                  referencedIdentifiers: mRefs,
+                });
+                ln = mEndLine;
+              }
             }
           }
         }

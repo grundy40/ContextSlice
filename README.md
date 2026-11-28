@@ -1,4 +1,4 @@
-# ContextSlice Studio (`v0.4.1`)
+# ContextSlice Studio (`v0.4.2`)
 
 > **Targeted Structural Code Slicing & 1-Tool MCP Brain Plugin for AI Coding Agents**  
 > Before an LLM reads your codebase, ContextSlice builds a local dependency graph via **structural parsing** — returning a compact **Dual-State File Tree** when queries are empty or miss, preserving **complete implementations only for focal targets**, folding `1-hop` / `2-hop` neighbors into **signature skeletons**, and leaving unused budget blank without padding noise.
@@ -213,6 +213,10 @@ Please recommend the cleanest refactoring approach without breaking upstream cal
 
 ### 8. Changelog
 
+#### `v0.4.2` (2026-11-28)
+- **TS/JS Class Field Arrow Function & Function Expression Extraction**: Extended TS/JS Tree-sitter `class_body` traversal (`public_field_definition`, `property_definition`, `field_definition`), CLI/MCP offline extractors, and Web AST parsing to capture class property arrow functions and function expressions (e.g., `text: TextRespond = (...) => { ... }`) as method-level symbols covering the full field range (type annotations + function body).
+- **Peripheral (`hop >= 2`) & Low-Relevance File Token Cap**: Enforced a 25% peripheral budget cap under compact budgets (`<= 16384`, 30% above) inclusive of `<file_header>` + `<skeleton>` tokens for files pulled in only via `hop >= 2` or single-type matches, prioritizing multi-term direct-hit core files and `<focal>` targets first.
+
 #### `v0.4.1` (2026-11-28)
 - **Focal-First Budget Priority & Doc/Test Downweighting**: Downweighted documentation (`*.md`, `docs/**`, `CHANGELOG*`, `README*`) and test files (`tests/**`, `*_test.*`, `*.test.*`, `*.spec.*`, `test_*.*`) unless explicitly queried, enforced strict focal-first `<focal>` allocation before `hop="1"` skeletons, filtered pure syntax keywords (`class`, `def`, `function`, etc.) when symbol terms are present, and applied per-slice token caps so docs/tests never crowd out core source implementations under tight budgets (`16K`).
 - **Markdown Duplicate Header/Skeleton Fix & Compact Windowing**: Eliminated redundant `<file_header>` emission on `.md` files and module skeletons starting at line 1, and added compact ±16-line local windowing (480-token cap per doc) to prevent huge files like `CHANGELOG.md` from exhausting budget.
@@ -296,7 +300,7 @@ Released under the [MIT License](./LICENSE).
 > **專為 AI 程式開發打造之精準結構化切片與 1-Tool MCP 大腦外掛**  
 > 在 AI Agent 讀取大型專案前，ContextSlice 透過本地**結構解析（Structural Parsing）**建立依賴呼叫圖——空查詢或未命中時回傳精準防呆的**雙狀態目錄樹**，命中時僅輸出**目標完整程式碼與 1/2-Hop 關聯外框**，剩餘預算直接留白省錢、絕不硬塞無關檔案。
 
-🌐 **Language / 語言**: [English](#contextslice-studio-v041) · **繁體中文**
+🌐 **Language / 語言**: [English](#contextslice-studio-v042) · **繁體中文**
 
 ---
 
@@ -497,6 +501,10 @@ npm run build:cli  # 重新編譯並同步版號至 packages/cli/bin/
 ---
 
 ### 8. 版本更新紀錄（Changelog）
+
+#### `v0.4.2`（2026-11-28）
+- **擴充 TS/JS 類別屬性函式（Class Field Arrow Function）提取**：於 TS/JS Tree-sitter `class_body`（涵蓋 `public_field_definition`、`property_definition`、`field_definition`）、CLI／MCP 離線狀態機及網頁版解析器同步支援類別欄位箭頭函式與函式運算式（如 `text: TextRespond = (...) => { ... }`），完整涵蓋型別標註與函式本體起訖行號並提取為方法層級符號。
+- **限制低預算下外圍骨架（`hop >= 2`）Token 占比上限**：於緊湊預算（如 `<= 16384`）優先完整展開直接命中多個 Query 關鍵字的核心檔案與 `<focal>` 符號，並將僅透過 `hop >= 2` 或單一型別匹配帶入之低相關度周邊檔案（含 `<file_header>` 與 `<skeleton>`）限制於總預算 25%（常態 30%）以內。
 
 #### `v0.4.1`（2026-11-28）
 - **核心原始碼優先分配 `<focal>` 與文件／測試權重調降**：調降 `*.md`、`docs/**`、`CHANGELOG*`、`README*` 與測試檔（`tests/**`、`*_test.*`、`*.test.*`、`*.spec.*`、`test_*.*`）評分權重，除非明確查詢否則不允許搶佔 `<focal>` 預算；強制 `<focal>` 直接命中原始碼優先於 `hop="1"` 骨架與文件配置預算，並過濾純語法關鍵字（`class`、`def`、`function` 等），徹底解決 `16K` 預算下核心程式碼被文件與測試擠壓折疊的問題。

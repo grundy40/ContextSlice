@@ -86,6 +86,8 @@ export function detectHighComplexityClusters(
       /\.(md|mdx|rst|adoc|txt)$/i.test(node.filePath) ||
       /(?:^|\/)(?:docs?|documentation|tests?|__tests__|spec)(?:\/|$)/i.test(node.filePath);
 
+    const isPeripheralHop = hopDistance === null || hopDistance >= 2;
+
     if (
       focalSet.has(node.id) ||
       override !== 'auto' ||
@@ -93,13 +95,14 @@ export function detectHighComplexityClusters(
       isPassiveSignatureOnly ||
       isPythonClassWithMethods ||
       isDocOrTest ||
+      (isPeripheralHop && relevanceScore < 20) ||
       tokenDelta < 30
     ) {
       continue;
     }
 
     const isConnectedToWorkspace =
-      (hopDistance !== null && hopDistance <= 2) ||
+      (hopDistance !== null && hopDistance <= 1) ||
       degree >= 2 ||
       relevanceScore >= 12;
 

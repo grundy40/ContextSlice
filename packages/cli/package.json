@@ -1,6 +1,6 @@
 {
   "name": "@grundy40/contextslice",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Zero-dependency multi-language structural code slicer & 1-Tool MCP server for AI coding assistants (Claude Code, OpenCode, Pi Agent, Cursor).",
   "type": "module",
   "bin": {

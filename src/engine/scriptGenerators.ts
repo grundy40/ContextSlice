@@ -808,6 +808,133 @@ function extractPythonBlocks(lines, lineIdx) {
   return { blocks: results, endIdx };
 }
 
+function extractTsClassMembers(lines, classStartIdx, classEndIdx, exported, maskFn, findBraceEndFn, findStmtEndFn) {
+  const members = [];
+  const classSlice = lines.slice(classStartIdx, classEndIdx + 1).join('\n');
+  const maskedClassLines = maskFn(classSlice).split('\n');
+  let depth = 0;
+  let opened = false;
+  let relIdx = 0;
+
+  while (relIdx < maskedClassLines.length) {
+    const absIdx = classStartIdx + relIdx;
+    const rawLine = lines[absIdx] || '';
+    const trimmed = rawLine.trim();
+    const mLine = maskedClassLines[relIdx] || '';
+
+    if (depth === 1 && trimmed && !trimmed.startsWith('//') && !trimmed.startsWith('/*') && !trimmed.startsWith('*') && absIdx < classEndIdx) {
+      // 1) Standard class method: 'async text(...) { ... }'
+      const methodMatch = rawLine.match(/^\s{1,8}(?:(?:public|private|protected|async|static|override|abstract|get|set)\s+)*([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>]*>)?\s*\(/);
+      if (methodMatch && !['if', 'for', 'while', 'switch', 'catch', 'constructor'].includes(methodMatch[1])) {
+        const mName = methodMatch[1];
+        let braceRelLine = relIdx;
+        while (braceRelLine < maskedClassLines.length && braceRelLine - relIdx < 8 && !maskedClassLines[braceRelLine].includes('{')) {
+          braceRelLine++;
+        }
+        if (braceRelLine < maskedClassLines.length && maskedClassLines[braceRelLine].includes('{')) {
+          const mEnd = Math.min(classEndIdx - 1, findBraceEndFn(lines, absIdx));
+          if (mEnd >= absIdx + 1 && mEnd < classEndIdx) {
+            const mFull = lines.slice(absIdx, mEnd + 1).join('\n');
+            const sigIdx = mFull.indexOf('{');
+            const mSkel = (sigIdx === -1 || mEnd - absIdx < 3)
+              ? mFull
+              : mFull.slice(0, sigIdx).trim() + ' { /* ... ' + (mEnd - absIdx - 1) + ' lines folded */ }';
+            members.push({
+              name: mName,
+              kind: 'method',
+              exported,
+              startLine: absIdx + 1,
+              endLine: mEnd + 1,
+              full: mFull,
+              skeleton: mSkel
+            });
+            // Advance depth tracking past method lines cleanly
+            for (let k = relIdx; k <= mEnd - classStartIdx && k < maskedClassLines.length; k++) {
+              for (const ch of maskedClassLines[k]) {
+                if (ch === '{') { depth++; opened = true; }
+                else if (ch === '}') depth--;
+              }
+            }
+            relIdx = (mEnd - classStartIdx) + 1;
+            continue;
+          }
+        }
+      }
+
+      // 2) Class field arrow function / function expression: 'text: TextRespond = (...) => { ... }'
+      const fieldMatch = rawLine.match(/^\s{1,8}(?:(?:public|private|protected|readonly|static|override|abstract|declare|async)\s+)*([A-Za-z_$#][A-Za-z0-9_$]*)\s*[?!]?\s*(?::[^=]*)?(?:=|$)/);
+      if (fieldMatch && !['if', 'for', 'while', 'switch', 'catch', 'return'].includes(fieldMatch[1])) {
+        const fName = fieldMatch[1].replace(/^#/, '');
+        const lookSlice = maskedClassLines.slice(relIdx, Math.min(maskedClassLines.length, relIdx + 8)).join('\n');
+        const eqIdx = lookSlice.indexOf('=');
+        if (eqIdx !== -1) {
+          const afterEq = lookSlice.slice(eqIdx + 1);
+          const arrowRel = afterEq.indexOf('=>');
+          const fnMatch = afterEq.match(/\bfunction\b/);
+          const fnRel = fnMatch && fnMatch.index !== undefined ? fnMatch.index : -1;
+          const fnPosInLook = (arrowRel !== -1 && (fnRel === -1 || arrowRel < fnRel))
+            ? eqIdx + 1 + arrowRel
+            : (fnRel !== -1 ? eqIdx + 1 + fnRel : -1);
+          if (fnPosInLook !== -1) {
+            const lineOffsetToFn = lookSlice.slice(0, fnPosInLook).split('\n').length - 1;
+            const fnLineAbs = absIdx + lineOffsetToFn;
+            let bodyBraceLineAbs = -1;
+            for (let scan = fnLineAbs; scan <= Math.min(classEndIdx - 1, fnLineAbs + 5); scan++) {
+              const sMask = maskedClassLines[scan - classStartIdx] || '';
+              if (sMask.includes('{')) { bodyBraceLineAbs = scan; break; }
+              if (sMask.trim().endsWith(';')) break;
+            }
+            const mEnd = bodyBraceLineAbs !== -1
+              ? Math.min(classEndIdx - 1, findBraceEndFn(lines, bodyBraceLineAbs))
+              : Math.min(classEndIdx - 1, findStmtEndFn(lines, absIdx, 'ts'));
+            if (mEnd >= absIdx && mEnd < classEndIdx) {
+              const mFull = lines.slice(absIdx, mEnd + 1).join('\n');
+              let mSkel = mFull;
+              if (bodyBraceLineAbs !== -1 && mEnd - absIdx >= 3) {
+                const preBodyLines = lines.slice(absIdx, bodyBraceLineAbs + 1);
+                const lastPre = preBodyLines[preBodyLines.length - 1];
+                const lastMask = maskedClassLines[bodyBraceLineAbs - classStartIdx] || '';
+                const bCol = lastMask.indexOf('{');
+                if (bCol !== -1) {
+                  preBodyLines[preBodyLines.length - 1] = lastPre.slice(0, bCol);
+                  const sigText = preBodyLines.join('\n').trim();
+                  const folded = Math.max(1, mEnd - bodyBraceLineAbs - 1);
+                  mSkel = sigText + ' { /* ... ' + folded + ' lines folded */ }';
+                }
+              }
+              members.push({
+                name: fName,
+                kind: 'method',
+                exported,
+                startLine: absIdx + 1,
+                endLine: mEnd + 1,
+                full: mFull,
+                skeleton: mSkel
+              });
+              for (let k = relIdx; k <= mEnd - classStartIdx && k < maskedClassLines.length; k++) {
+                for (const ch of maskedClassLines[k]) {
+                  if (ch === '{') { depth++; opened = true; }
+                  else if (ch === '}') depth--;
+                }
+              }
+              relIdx = (mEnd - classStartIdx) + 1;
+              continue;
+            }
+          }
+        }
+      }
+    }
+
+    for (const ch of mLine) {
+      if (ch === '{') { depth++; opened = true; }
+      else if (ch === '}') depth--;
+    }
+    if (opened && depth <= 0) break;
+    relIdx++;
+  }
+  return members;
+}
+
 function assembleContextSliceXml(opts) {
   const {
     blocks,
@@ -919,7 +1046,7 @@ function assembleContextSliceXml(opts) {
       else if (b.role === 'source') score *= 1.25;
     }
 
-    return { ...b, score };
+    return { ...b, score, matchedTerms };
   }).sort((a, b) => b.score - a.score);
 
   // Build Call Graph with shortName + common dunder guard + parent/method loop avoidance
@@ -941,6 +1068,12 @@ function assembleContextSliceXml(opts) {
     }
   }
 
+  const isChildMethodOf = (child, parent) =>
+    child.filePath === parent.filePath &&
+    child.kind === 'method' &&
+    (child.name.startsWith(parent.name + '.') ||
+      (child.startLine > parent.startLine && child.endLine <= parent.endLine));
+
   const callAdj = Array.from({ length: scored.length }, () => new Set());
   const definedNames = Array.from(symbolMap.keys());
   for (let i = 0; i < scored.length; i++) {
@@ -956,10 +1089,7 @@ function assembleContextSliceXml(opts) {
         if (re.test(maskedCaller)) {
           for (const t of (symbolMap.get(sym) || [])) {
             const target = scored[t];
-            if (caller.filePath === target.filePath && (
-              (caller.kind === 'class' && target.kind === 'method' && target.name.startsWith(caller.name + '.')) ||
-              (target.kind === 'class' && caller.kind === 'method' && caller.name.startsWith(target.name + '.'))
-            )) continue;
+            if (isChildMethodOf(target, caller) || isChildMethodOf(caller, target)) continue;
             callAdj[i].add(t);
             callAdj[t].add(i);
           }
@@ -990,7 +1120,7 @@ function assembleContextSliceXml(opts) {
         const childIndices = [];
         for (let ci = 0; ci < scored.length; ci++) {
           const c = scored[ci];
-          if (c.filePath === b.filePath && c.kind === 'method' && c.name.startsWith(b.name + '.')) {
+          if (isChildMethodOf(c, b)) {
             const cShort = c.name.split('.').pop().toLowerCase();
             const explicitHit = terms.some((t) => cShort === t || cShort.includes(t));
             if (explicitHit || c.score >= b.score * 0.55) {
@@ -1000,7 +1130,7 @@ function assembleContextSliceXml(opts) {
         }
         if (childIndices.length > 0) {
           promotedParentClassSet.add(idx);
-          for (const ci of childIndices.slice(0, 3)) candidateChosen.add(ci);
+          for (const ci of childIndices.slice(0, 4)) candidateChosen.add(ci);
           continue;
         }
       }
@@ -1009,10 +1139,9 @@ function assembleContextSliceXml(opts) {
     for (const idx of candidateChosen) {
       const b = scored[idx];
       if (b.kind === 'method') {
-        const clsName = b.name.split('.')[0];
         const hasFullParent = [...candidateChosen].some((pIdx) => {
           const p = scored[pIdx];
-          return p && p.kind === 'class' && p.filePath === b.filePath && p.name === clsName;
+          return Boolean(p && p.kind === 'class' && isChildMethodOf(b, p));
         });
         if (hasFullParent) continue;
       }
@@ -1041,7 +1170,39 @@ function assembleContextSliceXml(opts) {
     }
   }
 
-  // Two-pass allocation ordering: ALL focal targets first, then promoted parent classes, then 1/2-hop source -> test -> doc
+  const fileHeaderTokenCache = new Map();
+  for (const [fp, hdr] of fileHeaders.entries()) {
+    if (PLAIN_TEXT_CONFIG_EXT_RE.test(fp) || DOC_EXT_RE.test(fp)) continue;
+    if (hdr && hdr.header) fileHeaderTokenCache.set(fp, estimateTokens(hdr.header) + 12);
+  }
+
+  const directCoreFiles = new Set(focalFiles);
+  for (const pid of promotedParentClassSet) directCoreFiles.add(scored[pid].filePath);
+  const minDirectTerms = Math.min(2, Math.max(1, terms.length));
+  for (let i = 0; i < scored.length; i++) {
+    const b = scored[i];
+    if (b.role !== 'source') continue;
+    const h = hopDistances.get(i);
+    const isDirectCallable = h === 1 && (b.kind === 'function' || b.kind === 'method' || b.kind === 'class');
+    if ((terms.length >= 2 && b.matchedTerms >= minDirectTerms) || isDirectCallable) {
+      directCoreFiles.add(b.filePath);
+    }
+  }
+
+  const isPeripheralIdx = (idx) => {
+    if (focalSet.has(idx) || promotedParentClassSet.has(idx)) return false;
+    const b = scored[idx];
+    if (focalFiles.has(b.filePath)) return false;
+    const h = hopDistances.get(idx);
+    if (h !== undefined && h >= 2) return true;
+    if (!directCoreFiles.has(b.filePath)) return true;
+    if ((b.kind === 'interface' || b.kind === 'type' || b.kind === 'const') && b.matchedTerms <= 1 && h === undefined) {
+      return true;
+    }
+    return false;
+  };
+
+  // Two-pass allocation ordering: ALL focal targets first, then promoted parent classes, source -> non-peripheral -> matchedTerms -> hop -> score
   const roleRank = (r) => (r === 'source' ? 0 : r === 'test' ? 1 : 2);
   const allocOrder = Array.from({ length: scored.length }, (_, i) => i).sort((a, b) => {
     const focA = focalSet.has(a) ? 0 : 1;
@@ -1053,6 +1214,10 @@ function assembleContextSliceXml(opts) {
     const rrA = roleRank(scored[a].role);
     const rrB = roleRank(scored[b].role);
     if (rrA !== rrB) return rrA - rrB;
+    const perA = isPeripheralIdx(a) ? 1 : 0;
+    const perB = isPeripheralIdx(b) ? 1 : 0;
+    if (perA !== perB) return perA - perB;
+    if (scored[a].matchedTerms !== scored[b].matchedTerms) return scored[b].matchedTerms - scored[a].matchedTerms;
     const hopA = hopDistances.get(a) ?? 99;
     const hopB = hopDistances.get(b) ?? 99;
     if (hopA !== hopB) return hopA - hopB;
@@ -1062,14 +1227,17 @@ function assembleContextSliceXml(opts) {
   let remaining = budget;
   let docBudgetUsed = 0;
   let testBudgetUsed = 0;
+  let peripheralBudgetUsed = 0;
   const docBudgetCap = hasSourceMatches ? Math.min(2048, Math.floor(budget * 0.12)) : Math.min(6144, Math.floor(budget * 0.5));
   const testBudgetCap = hasSourceMatches ? Math.min(3072, Math.floor(budget * 0.2)) : Math.floor(budget * 0.65);
+  const peripheralBudgetCap = budget <= 16384 ? Math.floor(budget * 0.25) : Math.floor(budget * 0.3);
   const dirBudgetUsed = {};
   const maxDirBudget = budget * 0.72;
 
   const includedIds = new Set();
   const includedFiles = [];
   const includedFilesSet = new Set();
+  const headerChargedFiles = new Set();
   const fullStart1EndLine = new Map();
   const coveredRangesByFile = new Map();
   const partialFiles = new Set();
@@ -1078,6 +1246,11 @@ function assembleContextSliceXml(opts) {
   const skelCandidates = [];
   const candidateItems = [];
 
+  const getHeaderReserve = (item) => {
+    if (headerChargedFiles.has(item.filePath)) return 0;
+    if (item.kind === 'module' && item.startLine === 1) return 0;
+    return fileHeaderTokenCache.get(item.filePath) || 0;
+  };
   const addCoveredRange = (fp, s, e) => {
     if (!coveredRangesByFile.has(fp)) coveredRangesByFile.set(fp, []);
     coveredRangesByFile.get(fp).push([s, e]);
@@ -1103,9 +1276,8 @@ function assembleContextSliceXml(opts) {
   for (const idx of allocOrder) {
     const item = scored[idx];
     if (item.kind === 'method') {
-      const clsName = item.name.split('.')[0];
-      const fullSet = fullParentClassesByFile.get(item.filePath);
-      if (fullSet && fullSet.has(clsName)) continue;
+      const fullClasses = fullParentClassesByFile.get(item.filePath);
+      if (fullClasses && fullClasses.some((cls) => isChildMethodOf(item, cls))) continue;
     }
 
     const topDir = item.filePath.split('/')[0] || 'root';
@@ -1113,17 +1285,23 @@ function assembleContextSliceXml(opts) {
     const hop = hopDistances.get(idx);
     const isFocal = focalSet.has(idx);
     const isPromotedParent = promotedParentClassSet.has(idx);
+    const peripheral = isPeripheralIdx(idx);
     const key = item.filePath + ':' + item.startLine;
     const win = configWindowByKey.get(key);
+    const hdrCost = getHeaderReserve(item);
 
     if (isFocal && (item.rawTk <= remaining || remaining === budget) && (!hasSourceMatches || item.role !== 'doc')) {
       remaining = Math.max(0, remaining - item.rawTk);
+      if (hdrCost > 0 && hdrCost <= remaining) {
+        remaining -= hdrCost;
+        headerChargedFiles.add(item.filePath);
+      }
       dirBudgetUsed[topDir] = curDir + item.rawTk;
       addRoleBudget(item.role, item.rawTk);
       includedIds.add(key);
       if (item.kind === 'class') {
-        if (!fullParentClassesByFile.has(item.filePath)) fullParentClassesByFile.set(item.filePath, new Set());
-        fullParentClassesByFile.get(item.filePath).add(item.name);
+        if (!fullParentClassesByFile.has(item.filePath)) fullParentClassesByFile.set(item.filePath, []);
+        fullParentClassesByFile.get(item.filePath).push(item);
       }
       if (win) {
         for (const r of win.ranges) {
@@ -1137,32 +1315,47 @@ function assembleContextSliceXml(opts) {
       addSelectedBlock(item.filePath, { tier: 'full', item, win, autoExpanded: false });
     } else if (isPromotedParent && item.skelTk <= remaining) {
       remaining -= item.skelTk;
+      if (hdrCost > 0 && hdrCost <= remaining) {
+        remaining -= hdrCost;
+        headerChargedFiles.add(item.filePath);
+      }
       dirBudgetUsed[topDir] = curDir + item.skelTk;
       includedIds.add(key);
       partialFiles.add(item.filePath);
       addSelectedBlock(item.filePath, { tier: 'skeleton', item, win, hop: 1 });
-    } else if (item.skelTk <= remaining && (curDir + item.skelTk <= maxDirBudget || item.role === 'source') && canUseRoleBudget(item.role, item.skelTk)) {
-      const sameFileConst = item.kind === 'const' && (item.exported || /^[A-Z][A-Z0-9_]+$/.test(item.name)) && item.lineCount <= 25 && focalFiles.has(item.filePath);
-      const linked = (hop !== undefined && hop <= maxHops) || item.score > 0 || sameFileConst;
-      if (linked) {
-        remaining -= item.skelTk;
-        dirBudgetUsed[topDir] = curDir + item.skelTk;
-        addRoleBudget(item.role, item.skelTk);
-        includedIds.add(key);
-        partialFiles.add(item.filePath);
-        if (item.skeleton === item.full && !win) addCoveredRange(item.filePath, item.startLine, item.endLine);
-        if (autoExpand && item.role === 'source' && !isPromotedParent) {
-          skelCandidates.push({ idx, item, win, hop: hop ?? null, key });
+    } else {
+      const totalSkelCost = item.skelTk + hdrCost;
+      const fitsPeripheral = !peripheral || (peripheralBudgetUsed + totalSkelCost <= peripheralBudgetCap);
+      if (
+        fitsPeripheral &&
+        totalSkelCost <= remaining &&
+        (curDir + item.skelTk <= maxDirBudget || item.role === 'source') &&
+        canUseRoleBudget(item.role, item.skelTk)
+      ) {
+        const sameFileConst = item.kind === 'const' && (item.exported || /^[A-Z][A-Z0-9_]+$/.test(item.name)) && item.lineCount <= 25 && focalFiles.has(item.filePath);
+        const linked = (hop !== undefined && hop <= maxHops) || item.score > 0 || sameFileConst;
+        if (linked) {
+          remaining -= totalSkelCost;
+          if (hdrCost > 0) headerChargedFiles.add(item.filePath);
+          if (peripheral) peripheralBudgetUsed += totalSkelCost;
+          dirBudgetUsed[topDir] = curDir + totalSkelCost;
+          addRoleBudget(item.role, item.skelTk);
+          includedIds.add(key);
+          partialFiles.add(item.filePath);
+          if (item.skeleton === item.full && !win) addCoveredRange(item.filePath, item.startLine, item.endLine);
+          if (autoExpand && item.role === 'source' && !isPromotedParent && !peripheral) {
+            skelCandidates.push({ idx, item, win, hop: hop ?? null, key });
+          } else {
+            addSelectedBlock(item.filePath, { tier: 'skeleton', item, win, hop: hop ?? null });
+          }
         } else {
-          addSelectedBlock(item.filePath, { tier: 'skeleton', item, win, hop: hop ?? null });
+          partialFiles.add(item.filePath);
+          candidateItems.push(item);
         }
       } else {
         partialFiles.add(item.filePath);
         candidateItems.push(item);
       }
-    } else {
-      partialFiles.add(item.filePath);
-      candidateItems.push(item);
     }
   }
 
@@ -1171,8 +1364,8 @@ function assembleContextSliceXml(opts) {
     for (const cand of skelCandidates) {
       const it = cand.item;
       const delta = Math.max(0, it.rawTk - it.skelTk);
-      const isComplexCluster = (cand.hop !== null || it.score > 0) && (it.lineCount >= 16 || delta >= 45);
-      const canExpandClass = it.kind !== 'class' || !it.filePath.endsWith('.py');
+      const isComplexCluster = (cand.hop === 1 || it.matchedTerms >= minDirectTerms || it.score > 0) && (it.lineCount >= 16 || delta >= 45);
+      const canExpandClass = it.kind !== 'class' || (!it.filePath.endsWith('.py') && it.lineCount <= 80);
       if (canExpandClass && isComplexCluster && autoExpandedNames.length < 4 && delta <= remaining) {
         remaining -= delta;
         autoExpandedNames.push(it.name);
@@ -1221,6 +1414,7 @@ function assembleContextSliceXml(opts) {
   const footerByFile = new Map();
   for (const fp of includedFiles) {
     if (PLAIN_TEXT_CONFIG_EXT_RE.test(fp) || DOC_EXT_RE.test(fp)) continue;
+    if (!directCoreFiles.has(fp)) continue;
     const ftr = fileFooters.get(fp);
     if (!ftr) continue;
     const ranges = coveredRangesByFile.get(fp) || [];
@@ -1247,9 +1441,18 @@ function assembleContextSliceXml(opts) {
 
   for (const fp of includedFiles) {
     const rawEntries = (selectedByFile.get(fp) || []).slice().sort((a, b) => a.item.startLine - b.item.startLine);
-    const presentClassNames = new Set(rawEntries.filter((e) => e.item.kind === 'class').map((e) => e.item.name));
+    const fullClasses = rawEntries.filter((e) => e.tier === 'full' && e.item.kind === 'class').map((e) => e.item);
+    const structuralPyClasses = /\.pyw?$/i.test(fp)
+      ? rawEntries.filter((e) => e.item.kind === 'class').map((e) => e.item)
+      : [];
     const entries = rawEntries.filter(
-      (e) => !(e.tier === 'skeleton' && e.item.kind === 'method' && presentClassNames.has(e.item.name.split('.')[0])),
+      (e) =>
+        !(
+          e.tier === 'skeleton' &&
+          e.item.kind === 'method' &&
+          (fullClasses.some((cls) => isChildMethodOf(e.item, cls)) ||
+            structuralPyClasses.some((cls) => isChildMethodOf(e.item, cls)))
+        ),
     );
     const fullEntries = entries.filter((e) => e.tier === 'full');
     const hdr = headerByFile.get(fp);
@@ -1283,7 +1486,7 @@ function assembleContextSliceXml(opts) {
         let skelBody = ent.win ? ent.win.windowedCode : it.skeleton;
         if (!ent.win && it.kind === 'class' && /\.pyw?$/i.test(fp)) {
           const expandedChildRanges = fullEntries
-            .filter((fe) => fe.item.kind === 'method' && fe.item.name.startsWith(it.name + '.'))
+            .filter((fe) => isChildMethodOf(fe.item, it))
             .map((fe) => ({ name: fe.item.name, startLine: fe.item.startLine, endLine: fe.item.endLine }));
           if (expandedChildRanges.length > 0) {
             skelBody = buildPythonClassSkeleton(it.full, it.startLine, expandedChildRanges);
@@ -1701,8 +1904,15 @@ function extractBlocks(code, ext, fileName) {
       const skeleton = (kind === 'interface' || kind === 'type' || isShortConst || sigIdx === -1 || end - i < 4)
         ? full
         : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
-      blocks.push({ name, kind, exported: line.startsWith('export '), startLine: i + 1, endLine: end + 1, full, skeleton });
-      if (kind !== 'class' && kind !== 'module') i = end;
+      const isExported = line.startsWith('export ');
+      blocks.push({ name, kind, exported: isExported, startLine: i + 1, endLine: end + 1, full, skeleton });
+      if (kind === 'class' && /\\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i.test(e)) {
+        const classMembers = extractTsClassMembers(lines, i, end, isExported, maskCommentsAndStrings, findBraceEnd, findStatementEndLine);
+        if (classMembers.length > 0) blocks.push(...classMembers);
+        i = end;
+      } else if (kind !== 'class' && kind !== 'module') {
+        i = end;
+      }
     }
   }
 
@@ -2159,6 +2369,97 @@ async function extractBlocksWithTreeSitter(code, ext, fileName) {
       blocks.push({ name, kind, startLine, endLine, full, skeleton });
     }
 
+    // Extract TS/JS class field arrow functions & function expressions inside class_body
+    // (covers public_field_definition, property_definition, field_definition)
+    if (langName === 'typescript' || langName === 'tsx' || langName === 'javascript') {
+      const stack = [tree.rootNode];
+      while (stack.length > 0) {
+        const cur = stack.pop();
+        if (!cur) continue;
+        if (cur.type === 'class_body') {
+          const children = cur.namedChildren || [];
+          for (const fieldNode of children) {
+            if (
+              fieldNode.type !== 'public_field_definition' &&
+              fieldNode.type !== 'property_definition' &&
+              fieldNode.type !== 'field_definition'
+            ) {
+              continue;
+            }
+            let valNode = fieldNode.childForFieldName
+              ? (fieldNode.childForFieldName('value') || fieldNode.childForFieldName('initializer'))
+              : null;
+            if (!valNode && fieldNode.namedChildren) {
+              valNode = fieldNode.namedChildren.find(
+                (nc) =>
+                  nc.type === 'arrow_function' ||
+                  nc.type === 'function_expression' ||
+                  nc.type === 'function' ||
+                  nc.type === 'parenthesized_expression',
+              ) || null;
+            }
+            while (valNode && valNode.type === 'parenthesized_expression' && valNode.namedChildCount === 1) {
+              valNode = valNode.namedChild(0);
+            }
+            if (
+              !valNode ||
+              (valNode.type !== 'arrow_function' &&
+                valNode.type !== 'function_expression' &&
+                valNode.type !== 'function')
+            ) {
+              continue;
+            }
+            const nameNode =
+              (fieldNode.childForFieldName
+                ? (fieldNode.childForFieldName('name') || fieldNode.childForFieldName('property'))
+                : null) ||
+              (fieldNode.namedChildren || []).find(
+                (nc) =>
+                  nc.type === 'property_identifier' ||
+                  nc.type === 'private_property_identifier' ||
+                  nc.type === 'identifier',
+              );
+            const rawFieldName = nameNode ? String(nameNode.text || '').trim().replace(/^#/, '') : '';
+            if (!rawFieldName) continue;
+
+            const startLine = fieldNode.startPosition.row + 1;
+            const endLine = fieldNode.endPosition.row + 1;
+            const key = rawFieldName + '@' + startLine + '-' + endLine;
+            if (seen.has(key)) continue;
+            seen.add(key);
+
+            const full = lines.slice(startLine - 1, endLine).join('\\n');
+            let skeleton = full;
+            if (endLine - startLine >= 3) {
+              const fnBody = valNode.childForFieldName ? valNode.childForFieldName('body') : null;
+              if (fnBody && fnBody.type === 'statement_block') {
+                const bodyRow = fnBody.startPosition.row;
+                const bodyCol = fnBody.startPosition.column;
+                const preLines = lines.slice(startLine - 1, bodyRow + 1);
+                if (preLines.length > 0) {
+                  preLines[preLines.length - 1] = preLines[preLines.length - 1].slice(0, bodyCol);
+                  const sigPrefix = preLines.join('\\n').trim();
+                  const foldedLines = Math.max(1, endLine - (bodyRow + 1) - 1);
+                  skeleton = sigPrefix + \` { /* ... \${foldedLines} lines folded */ }\`;
+                }
+              } else {
+                const sigIdx = full.indexOf('{');
+                if (sigIdx !== -1) {
+                  skeleton = full.slice(0, sigIdx).trim() + \` { /* ... \${endLine - startLine - 1} lines folded */ }\`;
+                }
+              }
+            }
+            blocks.push({ name: rawFieldName, kind: 'method', startLine, endLine, full, skeleton });
+          }
+          continue;
+        }
+        const kids = cur.namedChildren || [];
+        for (let k = kids.length - 1; k >= 0; k--) {
+          stack.push(kids[k]);
+        }
+      }
+    }
+
     if (blocks.length === 0) return null;
     blocks.sort((a, b) => a.startLine - b.startLine);
     return blocks;
@@ -2328,8 +2629,15 @@ function extractBlocks(code, ext, fileName) {
       const skeleton = (kind === 'interface' || kind === 'type' || isShortConst || sigIdx === -1 || end - i < 4)
         ? full
         : full.slice(0, sigIdx).trim() + \` { /* ... \${end - i - 1} lines folded */ }\`;
-      blocks.push({ name, kind, exported: line.startsWith('export '), startLine: i + 1, endLine: end + 1, full, skeleton });
-      if (kind !== 'class' && kind !== 'module') i = end;
+      const isExported = line.startsWith('export ');
+      blocks.push({ name, kind, exported: isExported, startLine: i + 1, endLine: end + 1, full, skeleton });
+      if (kind === 'class' && /\\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i.test(e)) {
+        const classMembers = extractTsClassMembers(lines, i, end, isExported, maskCommentsAndStrings, findBraceEnd, findStatementEndLine);
+        if (classMembers.length > 0) blocks.push(...classMembers);
+        i = end;
+      } else if (kind !== 'class' && kind !== 'module') {
+        i = end;
+      }
     }
   }
 
