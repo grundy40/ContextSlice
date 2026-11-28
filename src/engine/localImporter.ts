@@ -11,9 +11,9 @@ export const MAX_IMPORT_FILE_BYTES = 1_500_000;
 export const BINARY_FILE_EXT =
   /\.(png|jpe?g|gif|webp|bmp|ico|icns|tiff?|svg|mp4|mov|avi|mkv|webm|wmv|flv|mp3|wav|ogg|flac|aac|m4a|wma|zip|rar|7z|tar|gz|bz2|xz|tgz|iso|dmg|exe|dll|so|dylib|bin|o|a|obj|lib|wasm|class|jar|war|pyc|pyo|ttf|otf|woff2?|eot|pdf|docx?|xlsx?|pptx?|odt|ods|odp|rtf|db|sqlite3?|mdb|psd|ai|sketch|fig|xd|blend|fbx|glb|gltf)$/i;
 
-/** 對結構分析沒有幫助的雜訊檔：各種 lock 檔、minified 產物與 source map */
+/** 對結構分析沒有幫助的雜訊檔與機密檔：lockfile、.env*、私鑰、minified 產物與 source map */
 export const NOISE_FILE_RE =
-  /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock|poetry\.lock|Gemfile\.lock|composer\.lock|go\.sum|Podfile\.lock|packages\.lock\.json)$|\.min\.(js|mjs|cjs|css)$|\.map$/i;
+  /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|poetry\.lock|Gemfile\.lock|composer\.lock|go\.sum|Podfile\.lock|packages\.lock\.json|\.env(\..*)?|.*\.pem|.*\.key|credentials\.json|service-account.*\.json|secrets\.json)$|\.min\.(js|mjs|cjs|css)$|\.map$/i;
 
 const SNIFF_SAMPLE_BYTES = 8192;
 

@@ -34,13 +34,10 @@ jobs:
             const tag = process.env.TAG_NAME || '';
             const ver = tag.replace(/^v/, '');
             if (!ver) throw new Error('Missing Git tag version');
-            fs.writeFileSync('src/version.ts', \"export const APP_VERSION = '\" + tag + \"';\\n\", 'utf8');
-            for (const file of ['package.json', 'packages/cli/package.json']) {
-              const json = JSON.parse(fs.readFileSync(file, 'utf8'));
-              json.version = ver;
-              fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\\n', 'utf8');
-            }
-            console.log('Synced versions to', tag, '/', ver);
+            const rootPkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            rootPkg.version = ver;
+            fs.writeFileSync('package.json', JSON.stringify(rootPkg, null, 2) + '\n', 'utf8');
+            console.log('Synced root package.json to', ver, '(src/version.ts & build:cli derive from package.json)');
           "
 
       - name: Run TypeScript lint & Vite build
@@ -57,6 +54,11 @@ jobs:
           node packages/cli/bin/ctxslice-mcp.mjs --version
           node -e "
             const { spawnSync } = require('node:child_process');
+            const cliEmpty = spawnSync('node', ['packages/cli/bin/ctxslice.mjs', '', '--root', '.'], { encoding: 'utf8' });
+            if (cliEmpty.status !== 0 || !cliEmpty.stdout.includes('file_tree_empty_query')) {
+              console.error(cliEmpty.stderr || cliEmpty.stdout);
+              process.exit(1);
+            }
             const res = spawnSync('node', ['packages/cli/bin/ctxslice-mcp.mjs'], {
               input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n',
               encoding: 'utf8'
@@ -65,7 +67,7 @@ jobs:
               console.error(res.stderr || res.stdout);
               process.exit(1);
             }
-            console.log('MCP handshake OK');
+            console.log('CLI & MCP verification OK');
           "
 
       - name: Publish @grundy40/contextslice to npm

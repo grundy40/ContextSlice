@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { FolderOpen, FilePlus2, X } from 'lucide-react';
 import {
   DirectoryHandleLike,
@@ -16,13 +16,19 @@ interface ImportPayload {
 
 interface ImportModalProps {
   open: boolean;
+  initialTab?: 'files' | 'paste';
   onClose: () => void;
   onImportFiles: (payload: ImportPayload) => void;
 }
 
-export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) {
+export function ImportModal({
+  open,
+  initialTab = 'files',
+  onClose,
+  onImportFiles,
+}: ImportModalProps) {
   const { t } = useI18n();
-  const [tab, setTab] = useState<'files' | 'paste'>('files');
+  const [tab, setTab] = useState<'files' | 'paste'>(initialTab);
   const [pastePath, setPastePath] = useState('src/services/OversizedHandler.ts');
   const [pasteContent, setPasteContent] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -31,6 +37,13 @@ export function ImportModal({ open, onClose, onImportFiles }: ImportModalProps) 
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (open) {
+      setTab(initialTab);
+      setErrorMsg(null);
+    }
+  }, [open, initialTab]);
 
   if (!open) return null;
 

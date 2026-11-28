@@ -132,6 +132,7 @@ const zhTW = {
     resetOverridesTitle: '清除所有手動釘選或覆寫狀態',
     budgetLabel: 'Token 上限:',
     budgetAria: 'Token 上限選擇',
+    hotTopicsLabel: '熱點標籤：',
   },
   explorer: {
     aria: '檔案與函式清單',
@@ -143,7 +144,7 @@ const zhTW = {
     searchPlaceholderExact: '精確搜尋函式、變數或檔名...',
     clearSearchAria: '清除搜尋條件',
     semanticTitle:
-      '開啟後，可依 AST 註解、語義同義詞與呼叫結構關聯模糊搜尋相關節點（即使忘記確切名稱也能找到）',
+      '開啟後，可依程式註解、語義同義詞與呼叫結構關聯模糊搜尋相關節點（即使忘記確切名稱也能找到）',
     semanticLabel: (enabled: boolean) => `語義模糊比對：${enabled ? '開' : '關'}`,
     enterFocus: 'Enter 聚焦',
     matchCount: (matched: number, total: number) => ({
@@ -151,9 +152,9 @@ const zhTW = {
       suffix: ` / ${total} 個節點`,
       matched,
     }),
-    semanticSortHint: '依語義與 AST 關聯排序',
+    semanticSortHint: '依語義與結構關聯排序',
     emptyTitle: '尚未匯入任何專案檔案',
-    emptyDesc: '請點擊上方「匯入資料夾 / 檔案」，選取本機程式碼或直接貼上程式段落。',
+    emptyDesc: '請選擇本機資料夾、程式碼檔案，或直接貼上程式段落開始整理。',
     noMatchPrefix: '找不到符合「',
     noMatchSuffix: '」的函式或變數',
     clearSearchBtn: '清除搜尋',
@@ -180,9 +181,16 @@ const zhTW = {
     zoomOutAria: '縮小',
     zoomInAria: '放大',
     autoFit: '自動置中',
-    emptyTitle: '尚未載入任何專案程式碼',
+    emptyTitle: '匯入本機程式碼，立即開始結構切片',
     emptyDesc:
-      '請點擊右上角「匯入資料夾 / 檔案」按鈕，選取本機資料夾、多個檔案或直接貼上程式碼，系統就會在瀏覽器端自動解析函式結構與依賴關係。',
+      '所有分析皆在瀏覽器本機完成，不會上傳原始碼。匯入後會自動產生「熱點標籤」與依賴關聯圖，不熟關鍵字也能一鍵切片並省下 Token。',
+    emptyPickFolderBtn: '匯入本機資料夾',
+    emptyPickFilesBtn: '選擇檔案',
+    emptyPasteBtn: '貼上程式碼',
+    emptyNoConnectedTitle: '目前沒有直接連線的焦點節點',
+    emptyNoConnectedDesc:
+      '請在上方輸入關鍵字、點擊熱點標籤，或點擊下方按鈕檢視全部已解析程式區塊。',
+    emptyShowAllBtn: (total: number) => `顯示全部 ${total} 個節點`,
     roleHeader: {
       'caller-2': '更上游（第2層誰用到它）',
       'caller-1': '上游（誰用到它）',
@@ -564,7 +572,7 @@ export type Messages = typeof zhTW;
 
 const en: Messages = {
   app: {
-    pageTitle: 'ContextSlice Studio — AST Code Slicing & Token Optimizer for AI',
+    pageTitle: 'ContextSlice Studio — Structural Code Slicing & Token Optimizer for AI',
     noProject: 'No Project Loaded',
     importLoaded: (source: string, count: number) =>
       `Loaded ${count} code files from "${source}"`,
@@ -653,6 +661,7 @@ const en: Messages = {
     resetOverridesTitle: 'Clear all manual pins and tier overrides',
     budgetLabel: 'Token Budget:',
     budgetAria: 'Select token budget',
+    hotTopicsLabel: 'Hot Topics:',
   },
   explorer: {
     aria: 'Files & Symbols Explorer',
@@ -664,7 +673,7 @@ const en: Messages = {
     searchPlaceholderExact: 'Exact search symbols, variables, or files...',
     clearSearchAria: 'Clear search',
     semanticTitle:
-      'Uses AST comments, behavioral synonyms, and call-graph neighbors for fuzzy semantic matching',
+      'Uses structural comments, behavioral synonyms, and call-graph neighbors for fuzzy semantic matching',
     semanticLabel: (enabled: boolean) => `Semantic Match: ${enabled ? 'ON' : 'OFF'}`,
     enterFocus: 'Enter to focus',
     matchCount: (matched: number, total: number) => ({
@@ -672,10 +681,10 @@ const en: Messages = {
       suffix: ` / ${total} nodes`,
       matched,
     }),
-    semanticSortHint: 'Sorted by semantic & AST relevance',
+    semanticSortHint: 'Sorted by semantic & structural relevance',
     emptyTitle: 'No project files imported yet',
     emptyDesc:
-      'Click "Import Folder / Files" above to select a local folder or paste a code snippet.',
+      'Pick a local folder, select source files, or paste a code snippet to begin.',
     noMatchPrefix: 'No symbols matching "',
     noMatchSuffix: '"',
     clearSearchBtn: 'Clear Search',
@@ -702,9 +711,16 @@ const en: Messages = {
     zoomOutAria: 'Zoom out',
     zoomInAria: 'Zoom in',
     autoFit: 'Fit View',
-    emptyTitle: 'No codebase loaded yet',
+    emptyTitle: 'Import a local codebase to start structural slicing',
     emptyDesc:
-      'Click "Import Folder / Files" in the top-right to select a folder, multiple files, or paste code. ContextSlice parses AST structures and dependencies locally in your browser.',
+      'Everything runs locally in your browser—zero source code leaves your machine. Once imported, Smart Topic Chips and the call graph appear automatically.',
+    emptyPickFolderBtn: 'Import Local Folder',
+    emptyPickFilesBtn: 'Select Files',
+    emptyPasteBtn: 'Paste Code',
+    emptyNoConnectedTitle: 'No focal nodes connected for current query',
+    emptyNoConnectedDesc:
+      'Type keywords or click a Smart Topic Chip above, or display all parsed symbol blocks below.',
+    emptyShowAllBtn: (total: number) => `Show All ${total} Nodes`,
     roleHeader: {
       'caller-2': '2-Hop Callers (Indirect Upstream)',
       'caller-1': '1-Hop Callers (Upstream)',

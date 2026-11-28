@@ -1,6 +1,8 @@
 import { getMessages, Locale } from '../i18n';
+import { APP_VERSION } from '../version';
 import {
   AstSymbolNode,
+  CodeFile,
   ComputedNodePlan,
   ContextAssemblyResult,
   McpToolInvocationRecord,
@@ -25,6 +27,23 @@ function containsCJK(text: string): boolean {
   return CJK_REGEX.test(text);
 }
 
+const PLAIN_TEXT_CONFIG_EXT_RE = /\.(json|jsonc|json5|yaml|yml|toml|ini|cfg|conf|xml|properties|txt)$/i;
+
+const EN_CONVERSATIONAL_STOPWORDS = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
+  'to', 'of', 'in', 'on', 'at', 'by', 'for', 'with', 'from', 'as', 'into', 'about',
+  'how', 'why', 'what', 'when', 'where', 'who', 'which', 'whom', 'whose',
+  'can', 'could', 'would', 'should', 'will', 'shall', 'may', 'might', 'must',
+  'do', 'does', 'did', 'done', 'doing', 'have', 'has', 'had', 'having',
+  'please', 'pls', 'help', 'me', 'my', 'we', 'our', 'you', 'your', 'they', 'their',
+  'it', 'its', 'this', 'that', 'these', 'those', 'there', 'here',
+  'and', 'or', 'but', 'so', 'than', 'too', 'very', 'just', 'only', 'also',
+  'fix', 'modify', 'want', 'need', 'tell',
+]);
+
+const ZH_CONVERSATIONAL_STOPWORDS_RE =
+  /為什麼|为什么|怎麼樣|怎么样|怎麼|怎么|如何|請幫我|请帮我|幫我|帮我|請問|请问|修改|更改|調整|调整|一下|什麼|什么|這個|这个|那個|那个|哪裡|哪里|[的了嗎呢啊吧著着過把被給跟與及]/g;
+
 const BILINGUAL_KEYWORDS: Array<[RegExp, string[]]> = [
   [/折扣|優惠|折價|coupon|discount/i, ['discount', 'coupon', 'promo', 'applydiscount', 'validatecoupon']],
   [/庫存|存貨|鎖定|競態|inventory|stock|lock/i, ['inventory', 'stock', 'lock', 'acquire', 'release', 'reserve']],
@@ -45,10 +64,22 @@ function expandQueryTerms(query: string): string[] {
 
   const tokens = new Set<string>();
 
-  // 1. ASCII 部分
-  const asciiParts = trimmed.toLowerCase().match(/[a-z0-9_]+/g) ?? [];
+  // 1. ASCII 部分（保留版號與連字號識別碼如 0.4.0、v0.4.0、ctxslice-mcp，同時安全濾除自然語言口語停用詞）
+  const asciiParts = trimmed.toLowerCase().match(/[a-z0-9_]+(?:[.-][a-z0-9_]+)*/g) ?? [];
   for (const p of asciiParts) {
-    if (p.length >= 2) tokens.add(p);
+    if (p.length >= 2 && !EN_CONVERSATIONAL_STOPWORDS.has(p)) {
+      tokens.add(p);
+      if (/^v\d/.test(p) && p.length >= 3) {
+        tokens.add(p.slice(1));
+      }
+      if (p.includes('.') || p.includes('-')) {
+        for (const sub of p.split(/[.-]/)) {
+          if (sub.length >= 2 && !EN_CONVERSATIONAL_STOPWORDS.has(sub)) {
+            tokens.add(sub);
+          }
+        }
+      }
+    }
   }
 
   // 2. Bilingual 關鍵字映射
@@ -58,20 +89,135 @@ function expandQueryTerms(query: string): string[] {
     }
   }
 
-  // 3. CJK 2-gram 分詞
+  // 3. CJK 2-gram 分詞（先濾除自然語言口語停用詞，保留技術關鍵字）
   if (containsCJK(trimmed)) {
-    const cjkTerms = tokenizeCJK2gram(trimmed);
-    cjkTerms.forEach(term => tokens.add(term));
+    const cleanedCjk = trimmed.replace(ZH_CONVERSATIONAL_STOPWORDS_RE, ' ');
+    if (containsCJK(cleanedCjk)) {
+      const cjkTerms = tokenizeCJK2gram(cleanedCjk);
+      cjkTerms.forEach((term) => tokens.add(term));
+    }
   }
 
   // 4. 雙語查詢擴展
   const allTerms = Array.from(tokens);
   for (const term of allTerms) {
     const bilingual = bilingualLookup(term);
-    bilingual.forEach(t => tokens.add(t));
+    bilingual.forEach((t) => tokens.add(t));
   }
 
   return Array.from(tokens);
+}
+
+function escapeXmlAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function escapeXmlText(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function mergeLineRanges(ranges: Array<[number, number]>): Array<[number, number]> {
+  if (ranges.length === 0) return [];
+  const sorted = [...ranges].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: Array<[number, number]> = [];
+  for (const [rawS, rawE] of sorted) {
+    const s = Math.max(1, rawS);
+    const e = Math.max(s, rawE);
+    if (merged.length === 0) {
+      merged.push([s, e]);
+    } else {
+      const prev = merged[merged.length - 1];
+      if (s <= prev[1] + 1) {
+        prev[1] = Math.max(prev[1], e);
+      } else {
+        merged.push([s, e]);
+      }
+    }
+  }
+  return merged;
+}
+
+function formatShownLines(ranges: Array<[number, number]>): string {
+  const merged = mergeLineRanges(ranges);
+  if (merged.length === 0) return 'none';
+  return merged.map(([s, e]) => (s === e ? String(s) : `${s}-${e}`)).join(', ');
+}
+
+interface ConfigWindowSlice {
+  windowedCode: string;
+  ranges: Array<[number, number]>;
+  tokens: number;
+}
+
+function slicePlainTextConfigWindow(
+  content: string,
+  queryTerms: string[],
+): ConfigWindowSlice | null {
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  if (lines.length <= 200) return null;
+
+  const matchedLines: number[] = [];
+  if (queryTerms.length > 0) {
+    for (let i = 0; i < lines.length; i++) {
+      const lower = lines[i].toLowerCase();
+      if (queryTerms.some((t) => lower.includes(t))) {
+        matchedLines.push(i + 1);
+      }
+    }
+  }
+
+  const rawRanges: Array<[number, number]> =
+    matchedLines.length > 0
+      ? matchedLines.map((ln) => [Math.max(1, ln - 40), Math.min(lines.length, ln + 40)])
+      : [[1, Math.min(lines.length, 81)]];
+
+  const merged = mergeLineRanges(rawRanges);
+  const parts: string[] = [];
+  for (let idx = 0; idx < merged.length; idx++) {
+    const [s, e] = merged[idx];
+    if (idx > 0) {
+      const prevEnd = merged[idx - 1][1];
+      parts.push(`// ... lines ${prevEnd + 1}-${s - 1} omitted ...`);
+    }
+    parts.push(lines.slice(s - 1, e).join('\n'));
+  }
+
+  const windowedCode = parts.join('\n');
+  return {
+    windowedCode,
+    ranges: merged,
+    tokens: estimateTokens(windowedCode),
+  };
+}
+
+function buildRepositoryFileTree(files: CodeFile[], maxTokens = 1800): string[] {
+  const sorted = [...files].sort((a, b) => a.path.localeCompare(b.path));
+  const out: string[] = [];
+  let usedTokens = 0;
+  let omittedCount = 0;
+
+  for (const f of sorted) {
+    const line = `    ${f.path} (${f.lineCount} lines)`;
+    const tk = estimateTokens(line);
+    if (usedTokens + tk > maxTokens && out.length > 0) {
+      omittedCount++;
+      continue;
+    }
+    usedTokens += tk;
+    out.push(line);
+  }
+
+  if (omittedCount > 0) {
+    out.push(`    ... (${omittedCount} more files omitted to keep overview within ~1.8K tokens)`);
+  }
+  return out;
 }
 
 export function scoreNodeRelevance(node: AstSymbolNode, queryTerms: string[], allNodes: AstSymbolNode[] = []): number {
@@ -431,8 +577,86 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
   } = options;
   const { engine: eng } = getMessages(locale);
   const { nodes, edges, totalRawTokens } = workspace;
+  const trimmedQuery = query.trim();
+  const hasManualOverride = Object.values(overrides).some((m) => m === 'full' || m === 'skeleton');
+  const validPinnedIds = pinnedFocalIds.filter((id) => nodes.some((n) => n.id === id));
+
+  // State A: Empty query with no manual pins/overrides -> return repository file tree overview
+  if (trimmedQuery === '' && validPinnedIds.length === 0 && !hasManualOverride) {
+    const emptyPlans: ComputedNodePlan[] = nodes.map((node) => ({
+      node,
+      tier: 'excluded',
+      override: overrides[node.id] ?? 'auto',
+      hopDistance: null,
+      relevanceScore: 0,
+      isFocal: false,
+      injectedTokens: 0,
+      reason: eng.reasonDefaultExcluded,
+    }));
+    const treeLines = buildRepositoryFileTree(workspace.files, 1800);
+    const packetSections: string[] = [
+      `<context_slice mode="file_tree_empty_query" version="${APP_VERSION.replace(/^v/, '')}" total_files="${workspace.files.length}">`,
+      '  <note>Empty query received. Returning repository file tree overview; call context_slice again with specific symbol or file keywords to retrieve code.</note>',
+      '  <repository_file_tree>',
+      ...treeLines,
+      '  </repository_file_tree>',
+      '</context_slice>',
+    ];
+    const assembledPacket = packetSections.join('\n');
+    const totalInjectedTokens = workspace.files.length === 0 ? 0 : estimateTokens(assembledPacket);
+    return {
+      nodePlans: emptyPlans,
+      focalNodeIds: [],
+      totalInjectedTokens,
+      budgetTokens,
+      budgetUtilizationPercent:
+        budgetTokens > 0 ? Math.min(999, Number(((totalInjectedTokens / budgetTokens) * 100).toFixed(1))) : 0,
+      overBudget: totalInjectedTokens > budgetTokens,
+      countsByTier: { full: 0, skeleton: 0, map: 0, excluded: nodes.length },
+      metrics: {
+        rawRepoTokens: totalRawTokens,
+        slicedCodeTokens: totalInjectedTokens,
+        codeReductionPercent:
+          totalRawTokens > 0
+            ? Math.max(0, Number((((totalRawTokens - totalInjectedTokens) / totalRawTokens) * 100).toFixed(1)))
+            : 0,
+        traditionalSkillAndMcpTax: 4850,
+        traditionalMultiTurnReadBloat: Math.round(totalRawTokens * 1.15),
+        traditionalTotalTokens: 4850 + Math.round(totalRawTokens * 1.15),
+        thinMcpSchemaTax: 185,
+        thinMcpTotalTokens: 185 + totalInjectedTokens,
+        zeroTaxSchemaOverhead: 0,
+        zeroMcpRuleTax: 42,
+        zeroTaxTotalTokens: totalInjectedTokens,
+        netSavingsVsTraditionalPercent: 0,
+      },
+      assembledPacket: workspace.files.length === 0 ? '' : assembledPacket,
+      detectedClusters: [],
+      autoExpandedNodeIds: [],
+      autoExpansionToolCall: null,
+      remainingBudgetForExpansion: budgetTokens,
+    };
+  }
 
   const queryTerms = expandQueryTerms(query);
+
+  // Precompute ±40-line local windows for >200-line plain-text config files
+  const configWindowByNodeId = new Map<string, ConfigWindowSlice>();
+  for (const node of nodes) {
+    if (
+      node.kind === 'module' &&
+      node.lineCount > 200 &&
+      PLAIN_TEXT_CONFIG_EXT_RE.test(node.filePath)
+    ) {
+      const win = slicePlainTextConfigWindow(node.fullCode, queryTerms);
+      if (win) {
+        configWindowByNodeId.set(node.id, win);
+      }
+    }
+  }
+
+  const getEffectiveRawTokens = (node: AstSymbolNode) =>
+    configWindowByNodeId.get(node.id)?.tokens ?? node.rawTokens;
 
   // 1. Score all nodes with TF-IDF scarcity weighting
   const scores = new Map<string, number>();
@@ -440,8 +664,8 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     scores.set(node.id, scoreNodeRelevance(node, queryTerms, nodes));
   }
 
-  // 2. Determine focal nodes (pinned takes precedence, else top BM25 matches, else top exported function)
-  let focalIds: string[] = pinnedFocalIds.filter((id) => nodes.some((n) => n.id === id));
+  // 2. Determine focal nodes (pinned takes precedence, else top TF-IDF matches; NO arbitrary fallback on 0-match queries)
+  let focalIds: string[] = [...validPinnedIds];
 
   if (focalIds.length === 0 && queryTerms.length > 0) {
     const ranked = [...nodes]
@@ -456,12 +680,6 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
         .slice(0, 3)
         .map((r) => r.id);
     }
-  }
-
-  if (focalIds.length === 0 && nodes.length > 0) {
-    const firstCallable =
-      nodes.find((n) => n.exported && (n.kind === 'function' || n.kind === 'method')) ?? nodes[0];
-    focalIds = [firstCallable.id];
   }
 
   const focalSet = new Set(focalIds);
@@ -496,12 +714,11 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     }
   }
 
-  // 4. Priority ordering & greedy budget-aware tier assignment
+  // 4. Priority ordering & greedy budget-aware tier assignment (On-Demand Blanking: NO unrelated stuffing)
   const plansMap = new Map<string, ComputedNodePlan>();
-  const packetOverheadTokens = 95; // XML/Markdown section wrappers
+  const packetOverheadTokens = 95;
   let remainingBudget = Math.max(0, budgetTokens - packetOverheadTokens);
 
-  // Sort candidates: Manual Full -> Focal -> 1-Hop -> 2-Hop -> Same-File Types -> Rest
   const prioritySorted = [...nodes].sort((a, b) => {
     const ovA = overrides[a.id] ?? 'auto';
     const ovB = overrides[b.id] ?? 'auto';
@@ -516,7 +733,6 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     const sB = scores.get(b.id) ?? 0;
     if (sA !== sB) return sB - sA;
 
-    // Prefer keeping interfaces/types of touched files
     const typeA = a.kind === 'interface' || a.kind === 'type' ? 1 : 0;
     const typeB = b.kind === 'interface' || b.kind === 'type' ? 1 : 0;
     return typeB - typeA;
@@ -527,6 +743,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     const hop = hopMap.has(node.id) ? hopMap.get(node.id)! : null;
     const isFocal = focalSet.has(node.id);
     const relevanceScore = scores.get(node.id) ?? 0;
+    const effRawTokens = getEffectiveRawTokens(node);
 
     let tier: NodeTier = 'excluded';
     let reason = eng.reasonDefaultExcluded;
@@ -536,18 +753,18 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
       reason = eng.reasonManualExclude;
     } else if (override === 'full') {
       tier = 'full';
-      remainingBudget = Math.max(0, remainingBudget - node.rawTokens);
+      remainingBudget = Math.max(0, remainingBudget - effRawTokens);
       reason = eng.reasonManualFull;
     } else if (override === 'skeleton') {
       tier = 'skeleton';
       remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
       reason = eng.reasonManualSkeleton;
     } else {
-      // Automatic 3-tier progressive allocation
+      // Strictly include ONLY focal targets, 1/2-hop neighbors, and same-file types/constants
       if (isFocal) {
-        if (node.rawTokens <= remainingBudget || remainingBudget === budgetTokens - packetOverheadTokens) {
+        if (effRawTokens <= remainingBudget || remainingBudget === budgetTokens - packetOverheadTokens) {
           tier = 'full';
-          remainingBudget = Math.max(0, remainingBudget - node.rawTokens);
+          remainingBudget = Math.max(0, remainingBudget - effRawTokens);
           reason = eng.reasonFocalFull;
         } else if (node.skeletonTokens <= remainingBudget) {
           tier = 'skeleton';
@@ -577,20 +794,16 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
         focalIds.some((fid) => nodes.find((x) => x.id === fid)?.fileId === node.fileId) &&
         node.skeletonTokens <= remainingBudget
       ) {
-        // Same-file types and module-level constants are essential for single-file edits
         tier = 'skeleton';
         remainingBudget = Math.max(0, remainingBudget - node.skeletonTokens);
         reason = eng.reasonSameFileType;
-      } else if (node.exported && node.mapTokens <= remainingBudget * 0.35) {
-        tier = 'map';
-        remainingBudget = Math.max(0, remainingBudget - node.mapTokens);
-        reason = eng.reasonExportedMap;
       }
+      // On-demand blanking: leave remaining budget unused instead of stuffing unrelated symbols
     }
 
     const injectedTokens =
       tier === 'full'
-        ? node.rawTokens
+        ? effRawTokens
         : tier === 'skeleton'
           ? node.skeletonTokens
           : tier === 'map'
@@ -664,7 +877,7 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     const plan = plansMap.get(id);
     if (!plan) continue;
     plan.tier = 'full';
-    plan.injectedTokens = plan.node.rawTokens;
+    plan.injectedTokens = getEffectiveRawTokens(plan.node);
     plan.autoExpanded = true;
     plan.reason = eng.reasonAutoExpanded;
   }
@@ -687,15 +900,58 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     countsByTier[p.tier]++;
   }
 
-  // Assemble final prompt-ready context packet
   const fullBlocks = nodePlans.filter((p) => p.tier === 'full');
   const skeletonBlocks = nodePlans.filter((p) => p.tier === 'skeleton');
   const mapBlocks = nodePlans.filter((p) => p.tier === 'map');
 
-  const packetSections: string[] = [];
-  packetSections.push('<context_slice mode="progressive-ast-skeleton">');
+  // State B: Non-empty query with 0 matches (and no manual overrides) -> warn agent & return repository file tree
+  if (trimmedQuery !== '' && fullBlocks.length === 0 && skeletonBlocks.length === 0 && mapBlocks.length === 0) {
+    const treeLines = buildRepositoryFileTree(workspace.files, 1800);
+    const packetSections: string[] = [
+      `<context_slice mode="file_tree_zero_matches" version="${APP_VERSION.replace(/^v/, '')}" query="${escapeXmlAttr(query)}">`,
+      `  <note>WARNING: 0 matches found for query "${escapeXmlText(query)}". Do NOT guess code from this file tree alone—pick valid file paths or symbol names from the tree below and call context_slice again.</note>`,
+      '  <repository_file_tree>',
+      ...treeLines,
+      '  </repository_file_tree>',
+      '</context_slice>',
+    ];
+    const assembledPacket = packetSections.join('\n');
+    const totalInjectedTokens = estimateTokens(assembledPacket);
+    return {
+      nodePlans,
+      focalNodeIds: [],
+      totalInjectedTokens,
+      budgetTokens,
+      budgetUtilizationPercent:
+        budgetTokens > 0 ? Math.min(999, Number(((totalInjectedTokens / budgetTokens) * 100).toFixed(1))) : 0,
+      overBudget: totalInjectedTokens > budgetTokens,
+      countsByTier: { full: 0, skeleton: 0, map: 0, excluded: nodes.length },
+      metrics: {
+        rawRepoTokens: totalRawTokens,
+        slicedCodeTokens: totalInjectedTokens,
+        codeReductionPercent:
+          totalRawTokens > 0
+            ? Math.max(0, Number((((totalRawTokens - totalInjectedTokens) / totalRawTokens) * 100).toFixed(1)))
+            : 0,
+        traditionalSkillAndMcpTax: 4850,
+        traditionalMultiTurnReadBloat: Math.round(totalRawTokens * 1.15),
+        traditionalTotalTokens: 4850 + Math.round(totalRawTokens * 1.15),
+        thinMcpSchemaTax: 185,
+        thinMcpTotalTokens: 185 + totalInjectedTokens,
+        zeroTaxSchemaOverhead: 0,
+        zeroMcpRuleTax: 42,
+        zeroTaxTotalTokens: totalInjectedTokens,
+        netSavingsVsTraditionalPercent: 0,
+      },
+      assembledPacket,
+      detectedClusters: [],
+      autoExpandedNodeIds: [],
+      autoExpansionToolCall: null,
+      remainingBudgetForExpansion: budgetTokens,
+    };
+  }
 
-  // Preserve top-level imports, constants & types for every file that contributes code blocks
+  // Group output cleanly per file with <file path="..." total_lines="..." shown_lines="...">
   const fileById = new Map(workspace.files.map((f) => [f.id, f]));
   const fullStart1EndLine = new Map<string, number>();
   const coveredRangesByFile = new Map<string, Array<[number, number]>>();
@@ -704,13 +960,24 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     arr.push([start, end]);
     coveredRangesByFile.set(fileId, arr);
   };
+
   for (const p of fullBlocks) {
-    addCoveredRange(p.node.fileId, p.node.startLine, p.node.endLine);
-    if (p.node.startLine === 1) {
-      fullStart1EndLine.set(
-        p.node.fileId,
-        Math.max(fullStart1EndLine.get(p.node.fileId) ?? 0, p.node.endLine),
-      );
+    const win = configWindowByNodeId.get(p.node.id);
+    if (win) {
+      for (const [s, e] of win.ranges) {
+        addCoveredRange(p.node.fileId, s, e);
+        if (s === 1) {
+          fullStart1EndLine.set(p.node.fileId, Math.max(fullStart1EndLine.get(p.node.fileId) ?? 0, e));
+        }
+      }
+    } else {
+      addCoveredRange(p.node.fileId, p.node.startLine, p.node.endLine);
+      if (p.node.startLine === 1) {
+        fullStart1EndLine.set(
+          p.node.fileId,
+          Math.max(fullStart1EndLine.get(p.node.fileId) ?? 0, p.node.endLine),
+        );
+      }
     }
   }
   for (const p of skeletonBlocks) {
@@ -719,26 +986,30 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
     }
   }
 
-  const seenFileIds = new Set<string>();
-  const headerEndByFile = new Map<string, number>();
-  const preservedHeaders: Array<{ filePath: string; endLine: number; header: string }> = [];
+  const seenFileIds: string[] = [];
+  const seenFileSet = new Set<string>();
   for (const p of [...fullBlocks, ...skeletonBlocks]) {
-    if (seenFileIds.has(p.node.fileId)) continue;
-    seenFileIds.add(p.node.fileId);
-    const file = fileById.get(p.node.fileId);
-    if (!file) continue;
-    const hdr = extractFileHeader(file.content);
-    if (!hdr) continue;
-    const coveredEnd = fullStart1EndLine.get(p.node.fileId) ?? 0;
-    if (coveredEnd >= hdr.endLine) continue;
-    headerEndByFile.set(file.id, hdr.endLine);
-    preservedHeaders.push({ filePath: file.path, endLine: hdr.endLine, header: hdr.header });
+    if (!seenFileSet.has(p.node.fileId)) {
+      seenFileSet.add(p.node.fileId);
+      seenFileIds.push(p.node.fileId);
+    }
   }
 
-  const preservedFooters: Array<{ filePath: string; startLine: number; endLine: number; footer: string }> = [];
+  const headerByFile = new Map<string, { endLine: number; header: string }>();
   for (const fileId of seenFileIds) {
     const file = fileById.get(fileId);
-    if (!file) continue;
+    if (!file || PLAIN_TEXT_CONFIG_EXT_RE.test(file.path)) continue;
+    const hdr = extractFileHeader(file.content);
+    if (!hdr) continue;
+    const coveredEnd = fullStart1EndLine.get(fileId) ?? 0;
+    if (coveredEnd >= hdr.endLine) continue;
+    headerByFile.set(fileId, hdr);
+  }
+
+  const footerByFile = new Map<string, { startLine: number; endLine: number; footer: string; chunks: FileFooterChunk[] }>();
+  for (const fileId of seenFileIds) {
+    const file = fileById.get(fileId);
+    if (!file || PLAIN_TEXT_CONFIG_EXT_RE.test(file.path)) continue;
     const hasUnfullNode = nodePlans.some((p) => p.node.fileId === fileId && p.tier !== 'full');
     const ranges = coveredRangesByFile.get(fileId) ?? [];
     const wholeFileCovered = ranges.some(([s, e]) => s <= 1 && e >= file.lineCount);
@@ -746,75 +1017,107 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
 
     const ftr = extractFileFooter(file.content);
     if (!ftr) continue;
-    const hdrEnd = headerEndByFile.get(fileId) ?? 0;
+    const hdrEnd = headerByFile.get(fileId)?.endLine ?? 0;
     const uncoveredChunks = ftr.chunks.filter(
       (c) =>
         c.startLine > hdrEnd &&
         !ranges.some(([s, e]) => c.startLine >= s && c.endLine <= e),
     );
     if (uncoveredChunks.length > 0) {
-      preservedFooters.push({
-        filePath: file.path,
+      footerByFile.set(fileId, {
         startLine: uncoveredChunks[0].startLine,
         endLine: uncoveredChunks[uncoveredChunks.length - 1].endLine,
         footer: uncoveredChunks.map((c) => c.text).join('\n'),
+        chunks: uncoveredChunks,
       });
     }
   }
 
-  if (preservedHeaders.length > 0) {
-    packetSections.push(
-      '  <file_headers note="Top-level imports, module constants, and type declarations preserved for included files">',
-    );
-    for (const h of preservedHeaders) {
-      packetSections.push(`    // [${h.filePath}:1-${h.endLine}] (file header)`);
-      packetSections.push(h.header);
-      packetSections.push('');
+  const packetSections: string[] = [];
+  packetSections.push(
+    `<context_slice mode="progressive-structural-slice" version="${APP_VERSION.replace(/^v/, '')}" budget="${budgetTokens}">`,
+  );
+
+  for (const fileId of seenFileIds) {
+    const file = fileById.get(fileId);
+    if (!file) continue;
+    const fileFulls = fullBlocks.filter((p) => p.node.fileId === fileId);
+    const fileSkels = skeletonBlocks.filter((p) => p.node.fileId === fileId);
+    const hdr = headerByFile.get(fileId);
+    const ftr = footerByFile.get(fileId);
+
+    const shownRanges: Array<[number, number]> = [];
+    if (hdr) shownRanges.push([1, hdr.endLine]);
+    for (const p of fileFulls) {
+      const win = configWindowByNodeId.get(p.node.id);
+      if (win) shownRanges.push(...win.ranges);
+      else shownRanges.push([p.node.startLine, p.node.endLine]);
     }
-    packetSections.push('  </file_headers>');
+    for (const p of fileSkels) {
+      const win = configWindowByNodeId.get(p.node.id);
+      if (win) shownRanges.push(...win.ranges);
+      else shownRanges.push([p.node.startLine, p.node.endLine]);
+    }
+    if (ftr) {
+      for (const c of ftr.chunks) shownRanges.push([c.startLine, c.endLine]);
+    }
+
+    const shownLinesAttr = formatShownLines(shownRanges);
+    packetSections.push(
+      `  <file path="${escapeXmlAttr(file.path)}" total_lines="${file.lineCount}" shown_lines="${shownLinesAttr}">`,
+    );
+
+    if (hdr) {
+      packetSections.push(`    <file_header lines="1-${hdr.endLine}">`);
+      packetSections.push(hdr.header);
+      packetSections.push('    </file_header>');
+    }
+
+    const combinedBlocks = [
+      ...fileSkels.map((p) => ({ kind: 'skeleton' as const, plan: p })),
+      ...fileFulls.map((p) => ({ kind: 'full' as const, plan: p })),
+    ].sort((a, b) => a.plan.node.startLine - b.plan.node.startLine);
+
+    for (const entry of combinedBlocks) {
+      const p = entry.plan;
+      const win = configWindowByNodeId.get(p.node.id);
+      if (entry.kind === 'skeleton') {
+        packetSections.push(
+          `    <skeleton symbol="${escapeXmlAttr(p.node.name)}" lines="${p.node.startLine}-${p.node.endLine}" note="${escapeXmlAttr(p.reason)}">`,
+        );
+        packetSections.push(win ? win.windowedCode : p.node.skeletonCode);
+        packetSections.push('    </skeleton>');
+      } else {
+        const tag = p.autoExpanded ? ' autoExpanded="true"' : '';
+        const linesAttr = win ? formatShownLines(win.ranges) : `${p.node.startLine}-${p.node.endLine}`;
+        packetSections.push(
+          `    <focal symbol="${escapeXmlAttr(p.node.name)}" lines="${linesAttr}"${tag}>`,
+        );
+        packetSections.push(win ? win.windowedCode : p.node.fullCode);
+        packetSections.push('    </focal>');
+      }
+    }
+
+    if (ftr) {
+      packetSections.push(`    <file_footer lines="${ftr.startLine}-${ftr.endLine}">`);
+      packetSections.push(ftr.footer);
+      packetSections.push('    </file_footer>');
+    }
+
+    packetSections.push('  </file>');
   }
 
   if (mapBlocks.length > 0) {
     packetSections.push('  <repo_symbol_map>');
     for (const p of mapBlocks) {
+      const fTotal = fileById.get(p.node.fileId)?.lineCount ?? p.node.endLine;
       packetSections.push(
-        `    - ${p.node.filePath}:${p.node.startLine}-${p.node.endLine} | ${p.node.kind} ${p.node.name}`,
+        `    <file path="${escapeXmlAttr(p.node.filePath)}" total_lines="${fTotal}" shown_lines="${p.node.startLine}-${p.node.endLine}">`,
       );
+      packetSections.push(`      ${p.node.kind} ${p.node.name}`);
+      packetSections.push('    </file>');
     }
     packetSections.push('  </repo_symbol_map>');
-  }
-
-  if (skeletonBlocks.length > 0) {
-    packetSections.push('  <dependency_skeletons note="Signatures and types only; implementations folded">');
-    for (const p of skeletonBlocks) {
-      packetSections.push(`    // [${p.node.filePath}:${p.node.startLine}-${p.node.endLine}] (${p.reason})`);
-      packetSections.push(p.node.skeletonCode);
-      packetSections.push('');
-    }
-    packetSections.push('  </dependency_skeletons>');
-  }
-
-  if (fullBlocks.length > 0) {
-    packetSections.push('  <focal_implementations note="Full source code for active edit targets & auto-expanded complex clusters">');
-    for (const p of fullBlocks) {
-      const tag = p.autoExpanded ? ' [MCP: expand_skeleton_cluster]' : '';
-      packetSections.push(`    // [${p.node.filePath}:${p.node.startLine}-${p.node.endLine}]${tag}`);
-      packetSections.push(p.node.fullCode);
-      packetSections.push('');
-    }
-    packetSections.push('  </focal_implementations>');
-  }
-
-  if (preservedFooters.length > 0) {
-    packetSections.push(
-      '  <file_footers note="Module-level exports and tail constant assignments preserved for partially sliced files">',
-    );
-    for (const ftr of preservedFooters) {
-      packetSections.push(`    // [${ftr.filePath}:${ftr.startLine}-${ftr.endLine}] (file footer)`);
-      packetSections.push(ftr.footer);
-      packetSections.push('');
-    }
-    packetSections.push('  </file_footers>');
   }
 
   packetSections.push('</context_slice>');
@@ -827,15 +1130,15 @@ export function assembleDynamicContext(options: AssembleOptions): ContextAssembl
       : 0;
 
   // Protocol & Skill Context Tax Benchmark (per-turn overhead + raw read bloat)
-  const traditionalSkillAndMcpTax = 4850; // ~2,000 tokens Skill prompt + ~2,850 tokens (18-22 MCP tool JSON schemas)
+  const traditionalSkillAndMcpTax = 4850;
   const traditionalMultiTurnReadBloat = Math.round(totalRawTokens * 1.15);
   const traditionalTotalTokens = traditionalSkillAndMcpTax + traditionalMultiTurnReadBloat;
 
-  const thinMcpSchemaTax = 185; // 1 consolidated tool: get_context_slice(query, budget)
+  const thinMcpSchemaTax = 185;
   const thinMcpTotalTokens = thinMcpSchemaTax + totalInjectedTokens;
 
   const zeroTaxSchemaOverhead = 0;
-  const zeroMcpRuleTax = 42; // Ultra-short 42-token instruction pointing to .context/active-slice.md
+  const zeroMcpRuleTax = 42;
   const zeroTaxTotalTokens = totalInjectedTokens;
 
   const netSavingsVsTraditionalPercent =

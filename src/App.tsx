@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, HelpCircle, Sparkles, X } from 'lucide-react';
 import { parseWorkspaceFiles } from './engine/astParser';
 import { assembleDynamicContext } from './engine/contextAssembler';
 import {
   DirectoryHandleLike,
   readFilesFromDirectoryHandle,
+  readFilesFromFileList,
 } from './engine/localImporter';
 import { invokeSkeletonExpansionMcpTool } from './engine/skeletonExpansion';
 import { I18nProvider, useI18n } from './i18n';
@@ -114,7 +115,10 @@ function AppContent() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [focusRequest, setFocusRequest] = useState<{ nodeId: string; seq: number } | null>(null);
   const [importOpen, setImportOpen] = useState<boolean>(false);
+  const [importTab, setImportTab] = useState<'files' | 'paste'>('files');
   const [guideOpen, setGuideOpen] = useState<boolean>(false);
+  const directFileInputRef = useRef<HTMLInputElement>(null);
+  const directFolderInputRef = useRef<HTMLInputElement>(null);
   const [proactiveState, setProactiveState] = useState<{
     contextKey: string;
     expandedNodeIds: string[];
@@ -372,6 +376,7 @@ function AppContent() {
   const handleRescanFolder = async () => {
     const handle = dirHandleRef.current;
     if (!handle) {
+      setImportTab('files');
       setImportOpen(true);
       return;
     }
@@ -383,9 +388,45 @@ function AppContent() {
         setImportReport(report);
       }
     } catch {
+      setImportTab('files');
       setImportOpen(true);
     } finally {
       setIsRescanning(false);
+    }
+  };
+
+  const handleDirectPickFolder = async () => {
+    const pickerWin = window as Window & {
+      showDirectoryPicker?: (opts?: { mode?: 'read' | 'readwrite' }) => Promise<DirectoryHandleLike>;
+    };
+    if (typeof pickerWin.showDirectoryPicker === 'function') {
+      try {
+        const dirHandle = await pickerWin.showDirectoryPicker({ mode: 'read' });
+        const { files, report } = await readFilesFromDirectoryHandle(dirHandle);
+        if (files.length > 0) {
+          handleImportFiles({ files, report, directoryHandle: dirHandle });
+          return;
+        }
+      } catch (err) {
+        const errName = err instanceof Error ? err.name : '';
+        if (errName === 'AbortError') return;
+      }
+    }
+    directFolderInputRef.current?.click();
+  };
+
+  const handleDirectPickFiles = () => {
+    directFileInputRef.current?.click();
+  };
+
+  const handleDirectFileList = async (list: FileList | null, sourceLabel: string) => {
+    if (!list || list.length === 0) return;
+    const { files, report } = await readFilesFromFileList(list, sourceLabel);
+    if (files.length > 0) {
+      handleImportFiles({ files, report, directoryHandle: null });
+    } else {
+      setImportTab('files');
+      setImportOpen(true);
     }
   };
 
@@ -507,7 +548,10 @@ function AppContent() {
       <HeaderBar
         activeView={activeView}
         onChangeView={setActiveView}
-        onOpenImport={() => setImportOpen(true)}
+        onOpenImport={() => {
+          setImportTab('files');
+          setImportOpen(true);
+        }}
         canRescanFolder={Boolean(dirHandleRef.current)}
         isRescanning={isRescanning}
         onRescanFolder={() => void handleRescanFolder()}
@@ -544,6 +588,8 @@ function AppContent() {
           setPinnedFocalIds([]);
         }}
         overrideCount={Object.keys(overrides).length}
+        files={workspace.files}
+        nodes={workspace.nodes}
       />
 
       {hasImportNotice && importReport && (
@@ -671,10 +717,21 @@ function AppContent() {
 
         {activeView === 'graph' && (
           <DependencyGraphView
+            fileCount={workspace.files.length}
             nodePlans={assembly.nodePlans}
             edges={workspace.edges}
             selectedNodeId={effectiveSelectedNodeId}
             focusRequest={focusRequest}
+            onOpenImport={() => {
+              setImportTab('files');
+              setImportOpen(true);
+            }}
+            onImportFolder={() => void handleDirectPickFolder()}
+            onImportFiles={handleDirectPickFiles}
+            onOpenPaste={() => {
+              setImportTab('paste');
+              setImportOpen(true);
+            }}
             onSelectNode={setSelectedNodeId}
             onToggleFocal={handleToggleFocal}
             onSetOverride={handleSetOverride}
@@ -722,8 +779,40 @@ function AppContent() {
         />
       </main>
 
+      <input
+        ref={directFileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          void handleDirectFileList(e.target.files, t.importModal.defaultSourceMulti);
+          e.target.value = '';
+        }}
+      />
+      <input
+        ref={directFolderInputRef}
+        type="file"
+        {...({
+          webkitdirectory: '',
+          directory: '',
+        } as React.InputHTMLAttributes<HTMLInputElement> & {
+          webkitdirectory?: boolean | string;
+          directory?: string;
+        })}
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const firstRel = (e.target.files?.[0] as (File & { webkitRelativePath?: string }) | undefined)
+            ?.webkitRelativePath;
+          const folderName = firstRel ? firstRel.split('/')[0] : t.importModal.defaultFolderName;
+          void handleDirectFileList(e.target.files, folderName);
+          e.target.value = '';
+        }}
+      />
+
       <ImportModal
         open={importOpen}
+        initialTab={importTab}
         onClose={() => setImportOpen(false)}
         onImportFiles={handleImportFiles}
       />

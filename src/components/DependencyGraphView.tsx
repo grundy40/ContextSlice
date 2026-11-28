@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Crosshair, Eye, EyeOff, FolderOpen, Map as MapIcon, Maximize2, Minimize2, Search, ZoomIn, ZoomOut } from 'lucide-react';
+import { Code2, Crosshair, Eye, EyeOff, FilePlus2, FolderOpen, Map as MapIcon, Maximize2, Minimize2, Search, ZoomIn, ZoomOut } from 'lucide-react';
 import { useI18n } from '../i18n';
 import {
   ComputedNodePlan,
@@ -9,11 +9,15 @@ import {
 } from '../types/context';
 
 interface DependencyGraphViewProps {
+  fileCount?: number;
   nodePlans: ComputedNodePlan[];
   edges: DependencyEdge[];
   selectedNodeId: string | null;
   focusRequest?: { nodeId: string; seq: number } | null;
   onOpenImport?: () => void;
+  onImportFolder?: () => void;
+  onImportFiles?: () => void;
+  onOpenPaste?: () => void;
   onSelectNode: (nodeId: string) => void;
   onToggleFocal: (nodeId: string) => void;
   onSetOverride: (nodeId: string, override: OverrideMode) => void;
@@ -37,11 +41,15 @@ const TIER_STROKE: Record<NodeTier, string> = {
 };
 
 export function DependencyGraphView({
+  fileCount = 0,
   nodePlans,
   edges,
   selectedNodeId,
   focusRequest,
   onOpenImport,
+  onImportFolder,
+  onImportFiles,
+  onOpenPaste,
   onSelectNode,
   onToggleFocal,
   onSetOverride,
@@ -438,6 +446,7 @@ export function DependencyGraphView({
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-[#0B0F17]">
       {/* Graph Legend, Filter & Quick Jump Controls */}
+      {nodePlans.length > 0 && (
       <div className="px-4 py-2.5 border-b border-slate-800/80 bg-[#0E1420] flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3 text-xs">
           {/* Focus Mode Toggle */}
@@ -539,28 +548,70 @@ export function DependencyGraphView({
           </button>
         </div>
       </div>
+      )}
 
       {/* Interactive SVG Canvas */}
       <div ref={containerRef} className="relative flex-1 min-h-0 overflow-hidden select-none">
         {layout.positioned.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center gap-3 px-6 text-center">
-            <p className="text-sm font-medium text-slate-200">
-              {t.graph.emptyTitle}
-            </p>
-            <p className="text-xs text-slate-400 max-w-md leading-relaxed">
-              {t.graph.emptyDesc}
-            </p>
-            {onOpenImport && (
-              <button
-                type="button"
-                onClick={onOpenImport}
-                className="mt-1 px-4 py-2 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-md flex items-center gap-1.5 cursor-pointer"
-              >
-                <FolderOpen className="w-3.5 h-3.5" />
-                {t.header.importBtn}
-              </button>
-            )}
-          </div>
+          fileCount === 0 ? (
+            <div className="h-full flex items-center justify-center p-6">
+              <div className="w-full max-w-lg rounded-lg border border-slate-800 bg-[#111827] p-6 text-center space-y-4">
+                <div className="space-y-1.5">
+                  <p className="text-sm font-semibold text-slate-100">
+                    {t.graph.emptyTitle}
+                  </p>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    {t.graph.emptyDesc}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    onClick={onImportFolder || onOpenImport}
+                    className="px-3.5 py-2 text-xs font-semibold bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    {t.graph.emptyPickFolderBtn}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onImportFiles || onOpenImport}
+                    className="px-3.5 py-2 text-xs font-medium bg-[#0B0F17] border border-slate-700 hover:border-slate-500 text-slate-200 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <FilePlus2 className="w-3.5 h-3.5 text-sky-400" />
+                    {t.graph.emptyPickFilesBtn}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onOpenPaste || onOpenImport}
+                    className="px-3.5 py-2 text-xs font-medium bg-[#0B0F17] border border-slate-700 hover:border-slate-500 text-slate-200 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <Code2 className="w-3.5 h-3.5 text-emerald-400" />
+                    {t.graph.emptyPasteBtn}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="h-full flex flex-col items-center justify-center gap-3 px-6 text-center">
+              <p className="text-sm font-medium text-slate-200">
+                {t.graph.emptyNoConnectedTitle}
+              </p>
+              <p className="text-xs text-slate-400 max-w-md leading-relaxed">
+                {t.graph.emptyNoConnectedDesc}
+              </p>
+              {onlyConnected && nodePlans.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setOnlyConnected(false)}
+                  className="mt-1 px-4 py-2 text-xs font-semibold bg-[#111827] border border-slate-700 hover:border-sky-500/60 text-sky-300 rounded-md flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <EyeOff className="w-3.5 h-3.5" />
+                  {t.graph.emptyShowAllBtn(nodePlans.length)}
+                </button>
+              )}
+            </div>
+          )
         ) : (
           <svg
             className="w-full h-full cursor-grab active:cursor-grabbing touch-none"

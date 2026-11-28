@@ -1,7 +1,7 @@
 {
   "name": "@grundy40/contextslice",
-  "version": "0.3.5",
-  "description": "Zero-dependency multi-language AST code slicer & 1-Tool MCP server for AI coding assistants (Claude Code, OpenCode, Pi Agent, Cursor).",
+  "version": "0.4.0",
+  "description": "Zero-dependency multi-language structural code slicer & 1-Tool MCP server for AI coding assistants (Claude Code, OpenCode, Pi Agent, Cursor).",
   "type": "module",
   "bin": {
     "contextslice": "./bin/ctxslice.mjs",
@@ -14,7 +14,7 @@
     "LICENSE"
   ],
   "keywords": [
-    "ast",
+    "structural-parsing",
     "mcp",
     "context-slice",
     "ai-coding",

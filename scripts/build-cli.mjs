@@ -49,13 +49,17 @@ async function main() {
     throw new Error('scriptGenerators.ts must export generateCliScript and generateThinMcpServer');
   }
 
+  const rootPkgPath = path.join(ROOT_DIR, 'package.json');
+  const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, 'utf8'));
   const pkgJsonPath = path.join(PKG_DIR, 'package.json');
   const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+  pkgJson.version = rootPkg.version;
+  fs.writeFileSync(pkgJsonPath, JSON.stringify(pkgJson, null, 2) + '\n', 'utf8');
 
   fs.mkdirSync(BIN_DIR, { recursive: true });
 
   const defaultConfig = {
-    query: 'fix bug',
+    query: '',
     budgetTokens: 32768,
     maxHops: 2,
     toolDir: './tools',

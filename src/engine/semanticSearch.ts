@@ -72,7 +72,20 @@ const BEHAVIOR_SYNONYM_GROUPS: Array<{ pattern: RegExp; terms: string[] }> = [
   },
 ];
 
-const CHINESE_GLUE_PATTERN = /[處理邏輯功能程式負責相關的跟與及機制流程怎麼如何做這那一下]/g;
+const CHINESE_GLUE_PATTERN =
+  /為什麼|为什么|怎麼樣|怎么样|怎麼|怎么|如何|請幫我|请帮我|幫我|帮我|請問|请问|修改|更改|調整|调整|一下|什麼|什么|這個|这个|那個|那个|哪裡|哪里|處理|邏輯|功能|程式|負責|相關|流程|[的了嗎呢啊吧著着過把被給跟與及做這那]/g;
+
+const ENGLISH_CONVERSATIONAL_STOPWORDS = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
+  'to', 'of', 'in', 'on', 'at', 'by', 'for', 'with', 'from', 'as', 'into', 'about',
+  'how', 'why', 'what', 'when', 'where', 'who', 'which', 'whom', 'whose',
+  'can', 'could', 'would', 'should', 'will', 'shall', 'may', 'might', 'must',
+  'do', 'does', 'did', 'done', 'doing', 'have', 'has', 'had', 'having',
+  'please', 'pls', 'help', 'me', 'my', 'we', 'our', 'you', 'your', 'they', 'their',
+  'it', 'its', 'this', 'that', 'these', 'those', 'there', 'here',
+  'and', 'or', 'but', 'so', 'than', 'too', 'very', 'just', 'only', 'also',
+  'fix', 'modify', 'want', 'need', 'tell',
+]);
 
 function splitIdentifierWords(ident: string): string[] {
   return ident
@@ -80,7 +93,7 @@ function splitIdentifierWords(ident: string): string[] {
     .replace(/[_\-./:]+/g, ' ')
     .toLowerCase()
     .split(/\s+/)
-    .filter((w) => w.length >= 2);
+    .filter((w) => w.length >= 2 && !ENGLISH_CONVERSATIONAL_STOPWORDS.has(w));
 }
 
 /**
@@ -131,15 +144,22 @@ function extractQueryIntent(rawQuery: string): {
     return { rawLower: '', asciiTerms: [], cjkPhrases: [], expandedTerms: [] };
   }
 
-  const asciiTerms = Array.from(
-    new Set(
-      (rawLower.match(/[a-z0-9_]+/g) ?? [])
-        .flatMap((part) => [part, ...splitIdentifierWords(part)])
-        .filter((t) => t.length >= 2),
-    ),
-  );
+  const rawAsciiMatches = rawLower.match(/[a-z0-9_]+(?:[.-][a-z0-9_]+)*/g) ?? [];
+  const asciiSet = new Set<string>();
+  for (const part of rawAsciiMatches) {
+    if (part.length >= 2 && !ENGLISH_CONVERSATIONAL_STOPWORDS.has(part)) {
+      asciiSet.add(part);
+      if (/^v\d/.test(part) && part.length >= 3) {
+        asciiSet.add(part.slice(1));
+      }
+    }
+    for (const w of splitIdentifierWords(part)) {
+      asciiSet.add(w);
+    }
+  }
+  const asciiTerms = Array.from(asciiSet);
 
-  // Extract CJK chunks after stripping generic glue words
+  // Extract CJK chunks after stripping generic conversational glue words
   const strippedCjk = rawLower.replace(CHINESE_GLUE_PATTERN, ' ');
   const cjkPhrases = Array.from(
     new Set(

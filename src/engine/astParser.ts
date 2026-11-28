@@ -72,8 +72,7 @@ export function detectLanguage(filePath: string): SupportedLanguage {
     lower.endsWith('.html') ||
     lower.endsWith('.htm') ||
     lower.endsWith('.vue') ||
-    lower.endsWith('.svelte') ||
-    lower.endsWith('.xml')
+    lower.endsWith('.svelte')
   ) {
     return 'html';
   }

@@ -1,6 +1,6 @@
 {
   "name": "ContextSlice Studio",
-  "description": "Zero-config AST symbol indexer and dynamic context slicing workbench for Web UI, CLI, Zero-Install, and 1-Tool MCP with progressive skeleton expansion.",
+  "description": "Zero-config structural parsing symbol indexer and dynamic context slicing workbench for Web UI, CLI, Zero-Install, and 1-Tool MCP with progressive skeleton expansion.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
